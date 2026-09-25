@@ -339,21 +339,19 @@ export class BrowserDiscoveryProvider implements DiscoveryProvider {
       for (let i = 0; i < detailBudget; i++) {
         const entry = entries[i];
         try {
-          await page.goto(entry.mapsUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-          await page.waitForTimeout(1500);
+          const link = page.locator("a.hfpxzc").nth(i);
+          await link.scrollIntoViewIfNeeded({ timeout: 8000 }).catch(() => undefined);
+          await link.click({ timeout: 10000 });
+          await page.locator('button[data-item-id="address"], a[data-item-id="authority"]').first().waitFor({ timeout: 15000 }).catch(() => undefined);
+          await page.waitForTimeout(800);
+          // @ts-ignore
           const d = (await page.evaluate(() => {
-            const pick = (sel: string) =>
-              (document.querySelector(sel)?.textContent || "").replace(/\s+/g, " ").trim();
-            const phoneRaw =
-              pick('button[data-item-id*="phone"]') ||
-              (document.querySelector('button[aria-label*="Phone"]')?.getAttribute("aria-label") ?? "");
-            const address = pick('button[data-item-id="address"]');
-            const webA = document.querySelector('a[data-item-id="authority"]') as HTMLAnchorElement | null;
-            const hours = Array.from(document.querySelectorAll(".t39EBf span"))
-              .map((e) => (e.textContent || "").trim())
-              .filter(Boolean)
-              .slice(0, 14);
-            return { phoneRaw, address, website: webA?.href ?? "", hours };
+            function pick(sel) { var el = document.querySelector(sel); return (el && el.textContent || "").replace(/\s+/g, " ").trim(); }
+            var phoneRaw = pick('button[data-item-id*="phone"]') || (document.querySelector('button[aria-label*="Phone:"]') && document.querySelector('button[aria-label*="Phone:"]').getAttribute("aria-label") || "") || pick('button[aria-label*="Phone"]');
+            var address = pick('button[data-item-id="address"]') || (document.querySelector('button[aria-label^="Address:"]') && document.querySelector('button[aria-label^="Address:"]').getAttribute("aria-label") || "");
+            var webA = document.querySelector('a[data-item-id="authority"]') || document.querySelector('a[aria-label^="Website:"]') || document.querySelector('a[aria-label="Open website"]');
+            var hours = Array.from(document.querySelectorAll(".t39EBf span")).map(function(e) { return (e.textContent || "").trim(); }).filter(Boolean).slice(0, 14);
+            return { phoneRaw: phoneRaw, address: address, website: webA ? webA.href : "", hours: hours };
           }).catch(() => null)) as { phoneRaw: string; address: string; website: string; hours: string[] } | null;
 
           const finalUrl = page.url();
@@ -380,8 +378,12 @@ export class BrowserDiscoveryProvider implements DiscoveryProvider {
             lat,
             lng,
           });
+          await page.goto(url, { waitUntil: "commit", timeout: 20000 }).catch(() => undefined);
+          await page.locator('div[role="feed"]').first().waitFor({ timeout: 15000 }).catch(() => undefined);
+          await page.waitForTimeout(1200);
         } catch {
-          /* detail visit failed — keep feed-level data */
+          await page.goto(url, { waitUntil: "commit", timeout: 20000 }).catch(() => undefined);
+          await page.waitForTimeout(1200);
         }
       }
 
