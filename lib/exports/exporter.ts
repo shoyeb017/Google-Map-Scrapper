@@ -42,7 +42,8 @@ export const EXPORT_COLUMNS = [
 
 function socialOf(b: PersistedBusiness, platform: string): string {
   const links = (b as unknown as { socialLinks?: { platform: string; url: string }[] }).socialLinks ?? [];
-  return links.find((s) => s.platform === platform)?.url ?? "";
+  // ALL profiles for the platform, comma-separated (never just the first).
+  return links.filter((s) => s.platform === platform).map((s) => s.url).join(", ");
 }
 
 export function businessToRow(b: PersistedBusiness): Record<string, string | number> {
@@ -54,9 +55,9 @@ export function businessToRow(b: PersistedBusiness): Record<string, string | num
     Subcategories: (b.secondaryCategories ?? []).join("; "),
     Description: b.description ?? "",
     Phone: phones[0] ?? "",
-    "Additional Phones": phones.slice(1).join("; "),
+    "Additional Phones": phones.slice(1).join(", "),
     Email: emails[0] ?? "",
-    "Additional Emails": emails.slice(1).join("; "),
+    "Additional Emails": emails.slice(1).join(", "),
     Website: b.website ?? "",
     "About URL": "",
     "Contact URL": "",

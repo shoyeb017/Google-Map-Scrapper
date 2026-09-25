@@ -1,5 +1,20 @@
 import { normalizeUrl } from "@/lib/normalization/normalize";
 
+export const KNOWN_PLATFORMS = [
+  "facebook",
+  "linkedin",
+  "instagram",
+  "youtube",
+  "x",
+  "tiktok",
+  "pinterest",
+  "whatsapp",
+  "telegram",
+  "threads",
+] as const;
+
+export type KnownPlatform = (typeof KNOWN_PLATFORMS)[number];
+
 const PATTERNS: { platform: string; match: RegExp; username?: RegExp }[] = [
   { platform: "facebook", match: /(^|\.)facebook\.com$/i, username: /facebook\.com\/([A-Za-z0-9._-]+)/i },
   { platform: "linkedin", match: /(^|\.)linkedin\.com$/i, username: /linkedin\.com\/(?:company|in|school)\/([A-Za-z0-9._-]+)/i },

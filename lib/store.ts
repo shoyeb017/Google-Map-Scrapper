@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { getSupabaseAdmin, isSupabaseConfigured } from "@/lib/supabase/server";
 import type { NormalizedBusiness } from "@/lib/providers/types";
-import { completenessScore, domainOf, isPlausiblePhone, normalizeName, normalizeUrl } from "@/lib/normalization/normalize";
+import { completenessScore, domainOf, isPlausiblePhone, normalizeEmail, normalizeName, normalizePhone, normalizeUrl } from "@/lib/normalization/normalize";
 import { duplicateKey } from "@/lib/deduplication/dedup";
 
 export interface PersistedBusiness extends NormalizedBusiness {
@@ -935,7 +935,7 @@ async function attachRelations(items: PersistedBusiness[]): Promise<void> {
   const ids = items.map((b) => b.id);
   const [socialRes, contactRes, attrRes] = await Promise.all([
     sb.from("business_social_links").select("business_id,platform,profile_url").in("business_id", ids),
-    sb.from("business_contacts").select("business_id,contact_type,value").in("business_id", ids),
+    sb.from("business_contacts").select("business_id,contact_type,value,is_primary").in("business_id", ids).order("is_primary", { ascending: false }),
     sb.from("business_attributes").select("business_id,attribute_key,attribute_value").in("business_id", ids).in("attribute_key", ["rating", "reviews_count"]),
   ]);
   const socialById = new Map<string, { platform: string; url: string }[]>();
@@ -1030,6 +1030,504 @@ export async function getBusiness(id: string): Promise<PersistedBusiness | null>
   const item = mapRow(data as Record<string, never>);
   await attachRelations([item]);
   return item;
+}
+
+// ---------- Manual business editing (production data stewardship) ----------
+
+export interface BusinessContactRecord {
+  id: string;
+  businessId: string;
+  type: "phone" | "email";
+  value: string;
+  normalized?: string | null;
+  category?: string | null;
+  isPrimary: boolean;
+  source?: string | null;
+}
+
+function toContactType(t: string): "phone" | "email" {
+  return t.toLowerCase().includes("mail") ? "email" : "phone";
+}
+
+export async function listContacts(businessId: string): Promise<BusinessContactRecord[]> {
+  if (!isSupabaseConfigured()) {
+    const b = await getBusiness(businessId);
+    if (!b) return [];
+    const out: BusinessContactRecord[] = [];
+    (b.phones ?? []).forEach((v, i) =>
+      out.push({ id: `local-phone-${i}`, businessId, type: "phone", value: v, isPrimary: i === 0, source: "local" })
+    );
+    (b.emails ?? []).forEach((v, i) =>
+      out.push({ id: `local-email-${i}`, businessId, type: "email", value: v, isPrimary: i === 0, source: "local" })
+    );
+    return out;
+  }
+  const sb = getSupabaseAdmin()!;
+  const { data, error } = await sb
+    .from("business_contacts")
+    .select("id,business_id,contact_type,value,normalized_value,category,is_primary,source")
+    .eq("business_id", businessId)
+    .order("is_primary", { ascending: false });
+  if (error) throw new Error(error.message);
+  return ((data ?? []) as Record<string, unknown>[]).map((r) => ({
+    id: r.id as string,
+    businessId: r.business_id as string,
+    type: toContactType(String(r.contact_type ?? "")),
+    value: String(r.value ?? ""),
+    normalized: (r.normalized_value as string) ?? null,
+    category: (r.category as string) ?? null,
+    isPrimary: Boolean(r.is_primary),
+    source: (r.source as string) ?? null,
+  }));
+}
+
+async function refreshCompleteness(businessId: string): Promise<void> {
+  try {
+    const b = await getBusiness(businessId);
+    if (!b) return;
+    const score = completenessScore({
+      name: b.name,
+      primaryCategory: b.primaryCategory,
+      phones: b.phones,
+      emails: b.emails,
+      website: b.website,
+      formattedAddress: b.formattedAddress,
+      latitude: b.latitude,
+      longitude: b.longitude,
+      description: b.description,
+      socialLinks: b.socialLinks,
+    });
+    if (!isSupabaseConfigured()) return;
+    const sb = getSupabaseAdmin()!;
+    await sb.from("businesses").update({ completeness_score: score, updated_at: new Date().toISOString() }).eq("id", businessId);
+  } catch {
+    /* completeness is best-effort */
+  }
+}
+
+export async function addContact(
+  businessId: string,
+  input: { type: "phone" | "email"; value: string; category?: string }
+): Promise<BusinessContactRecord> {
+  const raw = input.value.trim();
+  if (!raw) throw new Error("Value is required");
+  let value = raw;
+  let normalized: string | null = null;
+  if (input.type === "email") {
+    const { isRealEmail } = await import("@/lib/contacts/extractor");
+    if (!isRealEmail(raw)) throw new Error("Not a valid email address");
+    value = normalizeEmail(raw);
+    normalized = value;
+  } else {
+    if (!isPlausiblePhone(raw)) throw new Error("Not a valid phone number");
+    normalized = normalizePhone(raw);
+    if (!normalized) throw new Error("Not a valid phone number");
+  }
+  const category = (input.category ?? "general").slice(0, 40);
+
+  if (!isSupabaseConfigured()) {
+    const all = readJson<PersistedBusiness[]>(BIZ_FILE, []);
+    const b = all.find((x) => x.id === businessId);
+    if (!b) throw new Error("Business not found");
+    const arr = input.type === "email" ? (b.emails ?? []) : (b.phones ?? []);
+    if (!arr.some((v) => v.toLowerCase() === value.toLowerCase())) arr.push(value);
+    if (input.type === "email") b.emails = arr;
+    else b.phones = arr;
+    b.updatedAt = new Date().toISOString();
+    writeJson(BIZ_FILE, all);
+    await audit("CONTACT_ADDED", { entity: "business", entityId: businessId, result: `${input.type}: ${value}` });
+    return { id: `local-${input.type}-${Date.now()}`, businessId, type: input.type, value, normalized, category, isPrimary: arr[0]?.toLowerCase() === value.toLowerCase(), source: "manual" };
+  }
+
+  const sb = getSupabaseAdmin()!;
+  const { data: biz } = await sb.from("businesses").select("id,primary_phone,primary_email").eq("id", businessId).maybeSingle();
+  if (!biz) throw new Error("Business not found");
+  const makePrimary = input.type === "email" ? !(biz as { primary_email: string }).primary_email : !(biz as { primary_phone: string }).primary_phone;
+  const { data, error } = await sb
+    .from("business_contacts")
+    .insert({
+      business_id: businessId,
+      contact_type: input.type,
+      value,
+      normalized_value: normalized,
+      category,
+      source: "manual",
+      is_primary: makePrimary,
+      confidence: "high",
+      is_verified: true,
+    })
+    .select("id,business_id,contact_type,value,normalized_value,category,is_primary,source")
+    .single();
+  if (error) throw new Error(error.message);
+  if (input.type === "email") {
+    await sb.from("business_emails").upsert(
+      { business_id: businessId, email: value, category, source: "manual", confidence: "high" },
+      { onConflict: "business_id,email", ignoreDuplicates: true }
+    );
+    if (makePrimary) {
+      await sb.from("businesses").update({ primary_email: value, updated_at: new Date().toISOString() }).eq("id", businessId);
+    }
+  } else if (makePrimary) {
+    await sb.from("businesses").update({ primary_phone: value, updated_at: new Date().toISOString() }).eq("id", businessId);
+  }
+  await audit("CONTACT_ADDED", { entity: "business", entityId: businessId, result: `${input.type}: ${value}` });
+  await refreshCompleteness(businessId);
+  const r = data as Record<string, unknown>;
+  return {
+    id: r.id as string,
+    businessId: r.business_id as string,
+    type: input.type,
+    value: String(r.value ?? value),
+    normalized: (r.normalized_value as string) ?? normalized,
+    category: (r.category as string) ?? category,
+    isPrimary: Boolean(r.is_primary),
+    source: (r.source as string) ?? "manual",
+  };
+}
+
+export async function deleteContact(businessId: string, ref: { contactId?: string; type?: "phone" | "email"; value?: string }): Promise<boolean> {
+  if (!isSupabaseConfigured()) {
+    const all = readJson<PersistedBusiness[]>(BIZ_FILE, []);
+    const b = all.find((x) => x.id === businessId);
+    if (!b) return false;
+    const dropFrom = (arr: string[] | undefined, t: "phone" | "email"): string[] | undefined => {
+      if (!arr) return arr;
+      if (ref.type && ref.type !== t) return arr;
+      if (ref.contactId?.startsWith(`local-${t}-`)) {
+        const idx = Number(ref.contactId.slice(`local-${t}-`.length));
+        if (Number.isInteger(idx)) return arr.filter((_, i) => i !== idx);
+        return arr;
+      }
+      if (ref.value) return arr.filter((v) => v.toLowerCase() !== ref.value!.toLowerCase());
+      return arr;
+    };
+    const before = (b.phones?.length ?? 0) + (b.emails?.length ?? 0);
+    b.phones = dropFrom(b.phones, "phone") ?? [];
+    b.emails = dropFrom(b.emails, "email") ?? [];
+    b.updatedAt = new Date().toISOString();
+    writeJson(BIZ_FILE, all);
+    const removed = before - ((b.phones?.length ?? 0) + (b.emails?.length ?? 0)) > 0;
+    if (removed) await audit("CONTACT_DELETED", { entity: "business", entityId: businessId });
+    return removed;
+  }
+  const sb = getSupabaseAdmin()!;
+  let row: Record<string, unknown> | null = null;
+  if (ref.contactId && !ref.contactId.startsWith("local-")) {
+    const { data } = await sb.from("business_contacts").select("*").eq("id", ref.contactId).eq("business_id", businessId).maybeSingle();
+    row = (data as Record<string, unknown> | null) ?? null;
+  } else if (ref.type && ref.value) {
+    const { data } = await sb
+      .from("business_contacts")
+      .select("*")
+      .eq("business_id", businessId)
+      .eq("contact_type", ref.type)
+      .ilike("value", ref.value)
+      .limit(1)
+      .maybeSingle();
+    row = (data as Record<string, unknown> | null) ?? null;
+  }
+  if (!row) return false;
+  await sb.from("business_contacts").delete().eq("id", row.id as string);
+  if (toContactType(String(row.contact_type ?? "")) === "email") {
+    await sb.from("business_emails").delete().eq("business_id", businessId).ilike("email", String(row.value ?? ""));
+  }
+  if (row.is_primary) {
+    // Promote the next remaining contact of the same group to primary.
+    const type = toContactType(String(row.contact_type ?? ""));
+    const { data: rest } = await sb
+      .from("business_contacts")
+      .select("id,value")
+      .eq("business_id", businessId)
+      .eq("contact_type", type === "email" ? "email" : "phone")
+      .limit(1);
+    const next = ((rest ?? []) as { id: string; value: string }[])[0];
+    if (next) {
+      await sb.from("business_contacts").update({ is_primary: true }).eq("id", next.id);
+      await sb
+        .from("businesses")
+        .update({ ...(type === "email" ? { primary_email: next.value } : { primary_phone: next.value }), updated_at: new Date().toISOString() })
+        .eq("id", businessId);
+    } else {
+      await sb
+        .from("businesses")
+        .update({ ...(type === "email" ? { primary_email: null } : { primary_phone: null }), updated_at: new Date().toISOString() })
+        .eq("id", businessId);
+    }
+  }
+  await audit("CONTACT_DELETED", { entity: "business", entityId: businessId, result: String(row.value ?? "") });
+  await refreshCompleteness(businessId);
+  return true;
+}
+
+export async function setPrimaryContact(businessId: string, ref: { contactId?: string; type?: "phone" | "email"; value?: string }): Promise<boolean> {
+  if (!isSupabaseConfigured()) {
+    const all = readJson<PersistedBusiness[]>(BIZ_FILE, []);
+    const b = all.find((x) => x.id === businessId);
+    if (!b) return false;
+    const moveFirst = (arr: string[] | undefined, matchIdx: (a: string[]) => number) => {
+      if (!arr || arr.length < 2) return false;
+      const i = matchIdx(arr);
+      if (i <= 0) return i === 0;
+      const [v] = arr.splice(i, 1);
+      arr.unshift(v);
+      return true;
+    };
+    let ok = false;
+    if (ref.contactId?.startsWith("local-phone-")) {
+      ok = moveFirst(b.phones, (a) => a.findIndex((_, i) => `local-phone-${i}` === ref.contactId));
+    } else if (ref.contactId?.startsWith("local-email-")) {
+      ok = moveFirst(b.emails, (a) => a.findIndex((_, i) => `local-email-${i}` === ref.contactId));
+    } else if (ref.type === "phone" && ref.value) {
+      ok = moveFirst(b.phones, (a) => a.findIndex((v) => v.toLowerCase() === ref.value!.toLowerCase()));
+    } else if (ref.type === "email" && ref.value) {
+      ok = moveFirst(b.emails, (a) => a.findIndex((v) => v.toLowerCase() === ref.value!.toLowerCase()));
+    }
+    if (ok) {
+      b.updatedAt = new Date().toISOString();
+      writeJson(BIZ_FILE, all);
+    }
+    return ok;
+  }
+  const sb = getSupabaseAdmin()!;
+  let targetId: string | null = null;
+  let targetType: "phone" | "email" | null = null;
+  if (ref.contactId && !ref.contactId.startsWith("local-")) {
+    const { data } = await sb.from("business_contacts").select("id,contact_type").eq("id", ref.contactId).eq("business_id", businessId).maybeSingle();
+    const row = data as { id: string; contact_type: string } | null;
+    if (!row) return false;
+    targetId = row.id;
+    targetType = toContactType(row.contact_type);
+  } else if (ref.type && ref.value) {
+    const { data } = await sb
+      .from("business_contacts")
+      .select("id,contact_type")
+      .eq("business_id", businessId)
+      .eq("contact_type", ref.type)
+      .ilike("value", ref.value)
+      .limit(1)
+      .maybeSingle();
+    const row = data as { id: string; contact_type: string } | null;
+    if (!row) return false;
+    targetId = row.id;
+    targetType = ref.type;
+  }
+  if (!targetId || !targetType) return false;
+  // Clear primary within the same group (phone group covers phone/mobile/landline/whatsapp variants).
+  const groupTypes = targetType === "email" ? ["email"] : ["phone", "mobile", "landline", "whatsapp"];
+  await sb.from("business_contacts").update({ is_primary: false }).eq("business_id", businessId).in("contact_type", groupTypes);
+  const { data: updated } = await sb.from("business_contacts").update({ is_primary: true }).eq("id", targetId).select("value").single();
+  const val = (updated as { value: string } | null)?.value;
+  if (val) {
+    await sb
+      .from("businesses")
+      .update({ ...(targetType === "email" ? { primary_email: val } : { primary_phone: val }), updated_at: new Date().toISOString() })
+      .eq("id", businessId);
+  }
+  await audit("CONTACT_PRIMARY", { entity: "business", entityId: businessId, result: val ?? targetId });
+  return true;
+}
+
+export interface SocialInput {
+  platform: string;
+  url: string;
+}
+
+export async function addSocial(
+  businessId: string,
+  input: SocialInput
+): Promise<{ id: string; platform: string; url: string }> {
+  const { KNOWN_PLATFORMS, detectSocialPlatform } = await import("@/lib/social/detector");
+  const platform = input.platform.trim().toLowerCase();
+  if (!(KNOWN_PLATFORMS as readonly string[]).includes(platform)) {
+    throw new Error(`Unknown platform. Choose one of: ${(KNOWN_PLATFORMS as readonly string[]).join(", ")}`);
+  }
+  const raw = input.url.trim();
+  if (!raw) throw new Error("URL is required");
+  const withProto = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  let profileUrl: string;
+  try {
+    const u = new URL(withProto);
+    if (!/^https?:$/.test(u.protocol)) throw new Error("bad protocol");
+    u.hash = "";
+    profileUrl = u.toString();
+  } catch {
+    throw new Error("Not a valid URL");
+  }
+  // Canonicalize when the URL recognizably belongs to the platform.
+  const detected = detectSocialPlatform(profileUrl);
+  if (detected) profileUrl = detected.profileUrl;
+
+  if (!isSupabaseConfigured()) {
+    const all = readJson<PersistedBusiness[]>(BIZ_FILE, []);
+    const b = all.find((x) => x.id === businessId);
+    if (!b) throw new Error("Business not found");
+    b.socialLinks = b.socialLinks ?? [];
+    if (!b.socialLinks.some((s) => s.platform === platform && s.url === profileUrl)) {
+      b.socialLinks.push({ platform, url: profileUrl });
+    }
+    b.updatedAt = new Date().toISOString();
+    writeJson(BIZ_FILE, all);
+    await audit("SOCIAL_ADDED", { entity: "business", entityId: businessId, result: `${platform}: ${profileUrl}` });
+    await refreshCompleteness(businessId);
+    return { id: `local-${platform}-${Date.now()}`, platform, url: profileUrl };
+  }
+  const sb = getSupabaseAdmin()!;
+  const { data: biz } = await sb.from("businesses").select("id").eq("id", businessId).maybeSingle();
+  if (!biz) throw new Error("Business not found");
+  const { data, error } = await sb
+    .from("business_social_links")
+    .upsert(
+      {
+        business_id: businessId,
+        platform,
+        profile_url: profileUrl,
+        source: "manual",
+        is_official: true,
+        confidence: "high",
+        verification_status: "verified",
+      },
+      { onConflict: "business_id,platform,profile_url", ignoreDuplicates: false }
+    )
+    .select("id,platform,profile_url")
+    .single();
+  if (error) throw new Error(error.message);
+  await audit("SOCIAL_ADDED", { entity: "business", entityId: businessId, result: `${platform}: ${profileUrl}` });
+  await refreshCompleteness(businessId);
+  const r = data as { id: string; platform: string; profile_url: string };
+  return { id: r.id, platform: r.platform, url: r.profile_url };
+}
+
+export async function deleteSocial(businessId: string, ref: { socialId?: string; platform?: string; url?: string }): Promise<boolean> {
+  if (!isSupabaseConfigured()) {
+    const all = readJson<PersistedBusiness[]>(BIZ_FILE, []);
+    const b = all.find((x) => x.id === businessId);
+    if (!b?.socialLinks) return false;
+    const before = b.socialLinks.length;
+    // Local rows carry no stable ids — match by platform (+url when given).
+    b.socialLinks = b.socialLinks.filter((s) => {
+      if (ref.platform && ref.url) return !(s.platform === ref.platform && s.url === ref.url);
+      if (ref.platform) return s.platform !== ref.platform;
+      return true;
+    });
+    b.updatedAt = new Date().toISOString();
+    writeJson(BIZ_FILE, all);
+    const removed = before - b.socialLinks.length > 0;
+    if (removed) {
+      await audit("SOCIAL_DELETED", { entity: "business", entityId: businessId });
+      await refreshCompleteness(businessId);
+    }
+    return removed;
+  }
+  const sb = getSupabaseAdmin()!;
+  if (ref.socialId && !ref.socialId.startsWith("local-")) {
+    const { data } = await sb.from("business_social_links").delete().eq("id", ref.socialId).eq("business_id", businessId).select("id");
+    const ok = ((data ?? []) as unknown[]).length > 0;
+    if (ok) {
+      await audit("SOCIAL_DELETED", { entity: "business", entityId: businessId });
+      await refreshCompleteness(businessId);
+    }
+    return ok;
+  }
+  if (ref.platform) {
+    let q = sb.from("business_social_links").delete().eq("business_id", businessId).eq("platform", ref.platform);
+    if (ref.url) q = q.eq("profile_url", ref.url);
+    const { data } = await q.select("id");
+    const ok = ((data ?? []) as unknown[]).length > 0;
+    if (ok) {
+      await audit("SOCIAL_DELETED", { entity: "business", entityId: businessId, result: ref.platform });
+      await refreshCompleteness(businessId);
+    }
+    return ok;
+  }
+  return false;
+}
+
+const EDITABLE_FIELDS = [
+  "name",
+  "description",
+  "primaryCategory",
+  "website",
+  "formattedAddress",
+  "city",
+  "district",
+  "state",
+  "country",
+  "postalCode",
+] as const;
+
+export type EditableField = (typeof EDITABLE_FIELDS)[number];
+
+const FIELD_TO_COLUMN: Record<EditableField, string> = {
+  name: "name",
+  description: "description",
+  primaryCategory: "primary_category",
+  website: "website",
+  formattedAddress: "formatted_address",
+  city: "city",
+  district: "district",
+  state: "state",
+  country: "country",
+  postalCode: "postal_code",
+};
+
+export async function updateBusiness(
+  id: string,
+  patch: Partial<Record<EditableField, string | null>>
+): Promise<PersistedBusiness> {
+  const keys = (Object.keys(patch) as EditableField[]).filter((k) => EDITABLE_FIELDS.includes(k));
+  if (!keys.length) throw new Error("Nothing to update");
+  const clean: Record<string, string | null> = {};
+  for (const k of keys) {
+    const v = patch[k];
+    clean[k] = v == null ? null : String(v).trim().slice(0, 1000) || null;
+  }
+  if ("name" in clean && !clean.name) throw new Error("Business name cannot be empty");
+  if (clean.website) {
+    const norm = normalizeUrl(clean.website);
+    if (!norm) throw new Error("Not a valid website URL");
+    clean.website = norm;
+  }
+
+  if (!isSupabaseConfigured()) {
+    const all = readJson<PersistedBusiness[]>(BIZ_FILE, []);
+    const b = all.find((x) => x.id === id);
+    if (!b) throw new Error("Business not found");
+    for (const k of keys) {
+      (b as unknown as Record<string, unknown>)[k] = clean[k];
+    }
+    if (keys.includes("website")) {
+      b.website = clean.website;
+    }
+    b.updatedAt = new Date().toISOString();
+    writeJson(BIZ_FILE, all);
+    await audit("BUSINESS_UPDATED", { entity: "business", entityId: id, result: `fields: ${keys.join(", ")}` });
+    const updated = await getBusiness(id);
+    if (!updated) throw new Error("Business not found");
+    return updated;
+  }
+
+  const sb = getSupabaseAdmin()!;
+  const { data: exists } = await sb.from("businesses").select("id").eq("id", id).maybeSingle();
+  if (!exists) throw new Error("Business not found");
+  const row: Record<string, string | string[] | null> = { updated_at: new Date().toISOString() };
+  for (const k of keys) {
+    row[FIELD_TO_COLUMN[k]] = clean[k];
+  }
+  if (clean.website) {
+    row.canonical_website = clean.website;
+    row.website_domain = domainOf(clean.website);
+  }
+  if (clean.name) {
+    row.normalized_name = normalizeName(clean.name);
+    row.display_name = clean.name;
+  }
+  const { error } = await sb.from("businesses").update(row).eq("id", id);
+  if (error) throw new Error(error.message);
+  await audit("BUSINESS_UPDATED", { entity: "business", entityId: id, result: `fields: ${keys.join(", ")}` });
+  await refreshCompleteness(id);
+  const updated = await getBusiness(id);
+  if (!updated) throw new Error("Business not found");
+  return updated;
 }
 
 export async function saveJob(job: SearchJobRecord): Promise<void> {
