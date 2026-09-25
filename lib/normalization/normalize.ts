@@ -46,13 +46,26 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-export function normalizePhone(raw: string, defaultCountry = "BD"): string | null {
+export function normalizePhone(raw: string, defaultCountry: string | string[] = ["US", "BD"]): string | null {
   if (!isPlausiblePhone(raw)) return null;
-  try {
-    const p = parsePhoneNumberWithError(raw, defaultCountry as never);
-    if (p && p.isValid()) return p.format("E.164");
-  } catch {
-    /* fall through */
+  const regions = Array.isArray(defaultCountry) ? defaultCountry : [defaultCountry];
+  // Explicit international numbers parse region-free first.
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("+")) {
+    try {
+      const p = parsePhoneNumberWithError(trimmed);
+      if (p && p.isValid()) return p.format("E.164");
+    } catch {
+      /* fall through */
+    }
+  }
+  for (const region of regions) {
+    try {
+      const p = parsePhoneNumberWithError(raw, region as never);
+      if (p && p.isValid()) return p.format("E.164");
+    } catch {
+      /* try next region */
+    }
   }
   const digits = raw.replace(/[^\d+]/g, "");
   const digitCount = digits.replace(/\D/g, "").length;

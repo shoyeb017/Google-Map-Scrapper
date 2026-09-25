@@ -35,16 +35,22 @@ export function detectSocialPlatform(rawUrl: string): DetectedSocial | null {
   const normalized = normalizeUrl(rawUrl);
   if (!normalized) return null;
   if (SHARE_PATTERNS.some((re) => re.test(normalized))) return null;
+  let clean = normalized;
   let host = "";
   try {
-    host = new URL(normalized).hostname.toLowerCase();
+    const u = new URL(normalized);
+    host = u.hostname.toLowerCase();
+    // Profile identity never lives in the query string (?viewAsMember, ?fref…);
+    // stripping it prevents duplicate rows for the same profile.
+    u.search = "";
+    clean = u.toString();
   } catch {
     return null;
   }
   for (const p of PATTERNS) {
     if (p.match.test(host)) {
-      const m = p.username ? normalized.match(p.username) : null;
-      return { platform: p.platform, profileUrl: normalized, username: m?.[1] ?? null };
+      const m = p.username ? clean.match(p.username) : null;
+      return { platform: p.platform, profileUrl: clean, username: m?.[1] ?? null };
     }
   }
   return null;

@@ -1,12 +1,37 @@
 import * as cheerio from "cheerio";
 import { assertUrlSafe } from "@/lib/security/ssrf";
-import { extractContactsFromHtml } from "@/lib/contacts/extractor";
+import {
+  extractContactsFromHtml,
+  extractFromMarkdown,
+  extractJsonLdSocials,
+  extractSocials,
+  absoluteHrefs,
+  relMeHrefs,
+} from "@/lib/contacts/extractor";
 import { detectSocialPlatform } from "@/lib/social/detector";
+import {
+  fetchResilient,
+  fetchRendered,
+  fetchViaReader,
+  robotsAllows,
+  type CookieJar,
+} from "@/lib/enrichment/fetch";
 
 const PRIORITY_PATHS = ["about", "contact", "services", "products", "team", "careers", "support", "pricing", "blog", "faq"];
+const COMMON_PATHS: { path: string; type: string }[] = [
+  { path: "/contact", type: "contact" },
+  { path: "/contact-us", type: "contact" },
+  { path: "/about", type: "about" },
+  { path: "/about-us", type: "about" },
+  { path: "/support", type: "support" },
+];
 
-const BROWSER_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+export interface PageStat {
+  url: string;
+  status: "ok" | "failed" | "skipped" | "rendered" | "reader";
+  ms: number;
+  note?: string;
+}
 
 export interface EnrichmentResult {
   title: string | null;
@@ -20,6 +45,27 @@ export interface EnrichmentResult {
   contactUrl?: string | null;
   rendered: boolean;
   errors: string[];
+  pageStats: PageStat[];
+}
+
+function concurrency(): number {
+  const n = Number(process.env.ENRICHMENT_CONCURRENCY ?? 3);
+  return Math.min(Math.max(Number.isFinite(n) ? n : 3, 1), 6);
+}
+
+function politenessMs(): number {
+  const n = Number(process.env.ENRICHMENT_POLITENESS_MS ?? 400);
+  return Math.min(Math.max(Number.isFinite(n) ? n : 400, 0), 5000);
+}
+
+const lastHit = new Map<string, number>();
+async function politeDelay(host: string): Promise<void> {
+  const wait = politenessMs();
+  if (wait <= 0) return;
+  const last = lastHit.get(host) ?? 0;
+  const dt = Date.now() - last;
+  if (dt < wait) await new Promise((r) => setTimeout(r, wait - dt));
+  lastHit.set(host, Date.now());
 }
 
 function candidateUrls(raw: string): string[] {
@@ -37,11 +83,9 @@ function candidateUrls(raw: string): string[] {
   push(s);
   try {
     const u = new URL(s);
-    // protocol fallback
     const alt = new URL(s);
     alt.protocol = u.protocol === "https:" ? "http:" : "https:";
     push(alt.toString());
-    // www fallback
     if (!u.hostname.startsWith("www.")) {
       const www = new URL(s);
       www.hostname = `www.${u.hostname}`;
@@ -53,74 +97,64 @@ function candidateUrls(raw: string): string[] {
   return out.slice(0, 3);
 }
 
-async function fetchStatic(url: string, timeoutMs: number): Promise<{ html: string; finalUrl: string }> {
-  const u = await assertUrlSafe(url);
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(u.toString(), {
-      signal: ctrl.signal,
-      redirect: "follow",
-      headers: {
-        "User-Agent": BROWSER_UA,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${u.hostname}`);
-    const ct = res.headers.get("content-type") ?? "";
-    if (ct && !/html|text/i.test(ct)) throw new Error(`Skipped non-HTML content (${ct})`);
-    const len = Number(res.headers.get("content-length") ?? 0);
-    if (len > 8_000_000) throw new Error("Page too large, skipped");
-    const html = (await res.text()).slice(0, 2_000_000);
-    if (html.length < 500) throw new Error("Empty response body");
-    return { html, finalUrl: res.url };
-  } finally {
-    clearTimeout(t);
-  }
+interface FetchedPage {
+  html?: string;
+  markdown?: string;
+  finalUrl: string;
+  rendered: boolean;
+  viaReader: boolean;
 }
 
-// Rendered fallback for JS-heavy sites (needs Playwright browsers installed).
-async function fetchRendered(url: string, timeoutMs: number): Promise<{ html: string; finalUrl: string } | null> {
+// One URL, full fallback chain: resilient static → rendered browser →
+// remote reader. Throws with a classified message when all fail.
+async function fetchPageOnce(
+  url: string,
+  timeoutMs: number,
+  jar: CookieJar,
+  opts?: { referer?: string; allowReader?: boolean }
+): Promise<FetchedPage> {
+  let lastError = "";
   try {
-    const { chromium } = await import("playwright");
-    const browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-dev-shm-usage"] });
-    try {
-      const ctx = await browser.newContext({ userAgent: BROWSER_UA, locale: "en-US" });
-      const page = await ctx.newPage();
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: timeoutMs });
-      await page.waitForTimeout(2500);
-      const html = await page.content();
-      const finalUrl = page.url();
-      await ctx.close();
-      return html.length > 500 ? { html, finalUrl } : null;
-    } finally {
-      await browser.close().catch(() => undefined);
+    const host = new URL(url).hostname;
+    await politeDelay(host);
+    const r = await fetchResilient(url, { timeoutMs, referer: opts?.referer, jar });
+    return { html: r.html, finalUrl: r.finalUrl, rendered: false, viaReader: false };
+  } catch (e: unknown) {
+    lastError = e instanceof Error ? e.message : "fetch failed";
+    // Don't burn fallbacks on definitive answers
+    if (/robots\.txt|not found|auth required|Blocked URL|non-HTML|too large/i.test(lastError)) {
+      throw new Error(lastError);
     }
-  } catch {
-    return null;
   }
+  try {
+    const r = await fetchRendered(url, Math.min(timeoutMs + 10000, 30000));
+    if (r) return { html: r.html, finalUrl: r.finalUrl, rendered: true, viaReader: false };
+    lastError = `${lastError}; rendered empty`;
+  } catch (e: unknown) {
+    lastError = `${lastError}; rendered failed`;
+  }
+  if (opts?.allowReader !== false) {
+    const r = await fetchViaReader(url, timeoutMs);
+    if (r) return { markdown: r.markdown, finalUrl: r.finalUrl, rendered: false, viaReader: true };
+    lastError = `${lastError}; reader empty`;
+  }
+  throw new Error(lastError || "all fetch strategies failed");
 }
 
-async function fetchPage(
+async function fetchHomepage(
   website: string,
   timeoutMs: number,
+  jar: CookieJar,
   errors: string[]
-): Promise<{ html: string; finalUrl: string; rendered: boolean } | null> {
+): Promise<FetchedPage | null> {
   const candidates = candidateUrls(website);
   let lastError = "";
   for (const c of candidates) {
     try {
-      const r = await fetchStatic(c, timeoutMs);
-      return { ...r, rendered: false };
+      return await fetchPageOnce(c, timeoutMs, jar);
     } catch (e: unknown) {
       lastError = e instanceof Error ? e.message : "fetch failed";
     }
-  }
-  // Try rendered fetch on the primary URL before giving up
-  if (candidates.length > 0) {
-    const rendered = await fetchRendered(candidates[0], Math.min(timeoutMs + 10000, 30000));
-    if (rendered) return { ...rendered, rendered: true };
   }
   errors.push(`Homepage unreachable: ${lastError || "all variants failed"}`);
   return null;
@@ -138,6 +172,78 @@ function extractSummary($: cheerio.CheerioAPI): string | null {
   return combined || null;
 }
 
+async function runPool<T, R>(items: T[], size: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const queue = [...items];
+  const out: R[] = [];
+  const workers = Array.from({ length: Math.max(1, Math.min(size, items.length)) }, async () => {
+    while (queue.length > 0) {
+      const item = queue.shift()!;
+      out.push(await fn(item));
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+// Sitemap.xml discovery for contact/about-style pages (same host only).
+async function discoverSitemapUrls(base: URL, jar: CookieJar, cap: number): Promise<{ url: string; type: string }[]> {
+  const found: { url: string; type: string }[] = [];
+  const seen = new Set<string>();
+  const push = (u: string) => {
+    try {
+      const norm = new URL(u);
+      norm.hash = "";
+      if (norm.hostname !== base.hostname) return;
+      const key = norm.toString();
+      if (seen.has(key)) return;
+      seen.add(key);
+      const p = norm.pathname.toLowerCase();
+      for (const want of PRIORITY_PATHS) {
+        if (p.includes(want)) {
+          found.push({ url: key, type: want });
+          break;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+  try {
+    if (!(await robotsAllows(`https://${base.hostname}/sitemap.xml`))) return found;
+    const r = await fetchResilient(`https://${base.hostname}/sitemap.xml`, { timeoutMs: 10000, jar, checkRobots: false });
+    const $ = cheerio.load(r.html, { xmlMode: true });
+    const locs = $("loc")
+      .map((_, el) => $(el).text().trim())
+      .get()
+      .filter(Boolean)
+      .slice(0, 60);
+    // nested sitemap indexes (one level)
+    const nested = locs.filter((l) => l.toLowerCase().endsWith(".xml")).slice(0, 2);
+    for (const n of nested) {
+      try {
+        const nr = await fetchResilient(n, { timeoutMs: 10000, jar, checkRobots: false });
+        const $$ = cheerio.load(nr.html, { xmlMode: true });
+        $$("loc")
+          .map((_, el) => $$(el).text().trim())
+          .get()
+          .filter(Boolean)
+          .slice(0, 60)
+          .forEach((l) => locs.push(l));
+      } catch {
+        /* ignore nested failures */
+      }
+    }
+    for (const l of locs) {
+      if (l.toLowerCase().endsWith(".xml")) continue;
+      push(l);
+      if (found.length >= cap) break;
+    }
+  } catch {
+    /* no sitemap — navigation links + common paths still apply */
+  }
+  return found;
+}
+
 export interface QuickScan {
   title: string | null;
   emails: { value: string; category: string; pageUrl: string }[];
@@ -146,70 +252,87 @@ export interface QuickScan {
 }
 
 // Fast homepage-only pass: grabs the social links, emails and phones most
-// sites expose in their header/footer without crawling subpages. Used during
-// discovery so socials appear immediately; deep crawls can follow later.
+// sites expose in their header/footer without crawling subpages.
 export async function quickScanWebsite(website: string, timeoutMs = 9000): Promise<QuickScan> {
   const empty: QuickScan = { title: null, emails: [], phones: [], socials: [] };
-  for (const c of candidateUrls(website)) {
-    try {
-      const r = await fetchStatic(c, timeoutMs);
-      const $ = cheerio.load(r.html);
-      const title = $("title").first().text().trim().slice(0, 300) || null;
-      const contacts = extractContactsFromHtml(r.html, r.finalUrl);
-      const emails = new Map<string, { value: string; category: string; pageUrl: string }>();
-      const phones = new Map<string, { value: string; pageUrl: string }>();
-      for (const k of contacts) {
-        if (k.type === "email" && k.normalized && !emails.has(k.normalized)) {
-          emails.set(k.normalized, { value: k.value, category: k.category, pageUrl: r.finalUrl });
-        }
-        if (k.type === "phone" && k.normalized && !phones.has(k.normalized)) {
-          phones.set(k.normalized, { value: k.value, pageUrl: r.finalUrl });
-        }
-      }
-      const socials = new Map<string, { platform: string; url: string; pageUrl: string }>();
-      const hrefs = $("a[href]")
-        .map((_, el) => {
-          try {
-            return new URL($(el).attr("href") ?? "", r.finalUrl).toString();
-          } catch {
-            return "";
-          }
-        })
-        .get()
-        .filter(Boolean);
-      for (const h of hrefs) {
-        const d = detectSocialPlatform(h);
-        if (d && !socials.has(`${d.platform}|${d.profileUrl}`)) {
-          socials.set(`${d.platform}|${d.profileUrl}`, { platform: d.platform, url: d.profileUrl, pageUrl: r.finalUrl });
-        }
-      }
-      return {
-        title,
-        emails: Array.from(emails.values()).slice(0, 10),
-        phones: Array.from(phones.values()).slice(0, 10),
-        socials: Array.from(socials.values()).slice(0, 20),
-      };
-    } catch {
-      continue;
+  const jar: CookieJar = new Map();
+  const home = await fetchHomepage(website, timeoutMs, jar, []);
+  if (!home) return empty;
+  if (home.markdown) {
+    const { contacts, hrefs } = extractFromMarkdown(home.markdown, home.finalUrl);
+    return {
+      title: null,
+      emails: contacts.filter((c) => c.type === "email").map((c) => ({ value: c.value, category: c.category, pageUrl: home.finalUrl })).slice(0, 10),
+      phones: contacts.filter((c) => c.type === "phone").map((c) => ({ value: c.value, pageUrl: home.finalUrl })).slice(0, 10),
+      socials: extractSocials(hrefs).map((s) => ({ ...s, pageUrl: home.finalUrl })).slice(0, 20),
+    };
+  }
+  const html = home.html ?? "";
+  const $ = cheerio.load(html);
+  const title = $("title").first().text().trim().slice(0, 300) || null;
+  const contacts = extractContactsFromHtml(html, home.finalUrl);
+  const emails = new Map<string, { value: string; category: string; pageUrl: string }>();
+  const phones = new Map<string, { value: string; pageUrl: string }>();
+  for (const k of contacts) {
+    if (k.type === "email" && k.normalized && !emails.has(k.normalized)) {
+      emails.set(k.normalized, { value: k.value, category: k.category, pageUrl: home.finalUrl });
+    }
+    if (k.type === "phone" && k.normalized && !phones.has(k.normalized)) {
+      phones.set(k.normalized, { value: k.value, pageUrl: home.finalUrl });
     }
   }
-  return empty;
+  const socials = new Map<string, { platform: string; url: string; pageUrl: string }>();
+  const mergeSocialHref = (h: string) => {
+    const d = detectSocialPlatform(h);
+    if (d && !socials.has(`${d.platform}|${d.profileUrl}`)) {
+      socials.set(`${d.platform}|${d.profileUrl}`, { platform: d.platform, url: d.profileUrl, pageUrl: home.finalUrl });
+    }
+  };
+  for (const h of [...absoluteHrefs($, home.finalUrl), ...relMeHrefs($, home.finalUrl)]) mergeSocialHref(h);
+  for (const h of extractJsonLdSocials(html)) mergeSocialHref(h);
+  return {
+    title,
+    emails: Array.from(emails.values()).slice(0, 10),
+    phones: Array.from(phones.values()).slice(0, 10),
+    socials: Array.from(socials.values()).slice(0, 20),
+  };
 }
 
 export async function enrichWebsite(website: string, opts?: { maxPages?: number; timeoutMs?: number }): Promise<EnrichmentResult> {
   const maxPages = Math.min(opts?.maxPages ?? Number(process.env.ENRICHMENT_MAX_PAGES ?? 8), 20);
   const timeoutMs = opts?.timeoutMs ?? Number(process.env.ENRICHMENT_TIMEOUT_MS ?? 15000);
   const errors: string[] = [];
+  const pageStats: PageStat[] = [];
+  const jar: CookieJar = new Map();
+  const blank: EnrichmentResult = {
+    title: null, metaDescription: null, summary: null,
+    emails: [], phones: [], socials: [], pagesCrawled: 0,
+    rendered: false, errors, pageStats,
+  };
 
-  const home = await fetchPage(website, timeoutMs, errors);
-  if (!home) {
+  const t0 = Date.now();
+  const home = await fetchHomepage(website, timeoutMs, jar, errors);
+  if (!home) return blank;
+  pageStats.push({
+    url: home.finalUrl,
+    status: home.viaReader ? "reader" : home.rendered ? "rendered" : "ok",
+    ms: Date.now() - t0,
+  });
+
+  // Remote-reader path: no DOM — extract from markdown only.
+  if (home.markdown) {
+    const { contacts, hrefs } = extractFromMarkdown(home.markdown, home.finalUrl);
     return {
-      title: null, metaDescription: null, summary: null,
-      emails: [], phones: [], socials: [], pagesCrawled: 0, rendered: false, errors,
+      ...blank,
+      emails: contacts.filter((c) => c.type === "email").map((c) => ({ value: c.value, category: c.category, pageUrl: home.finalUrl })),
+      phones: contacts.filter((c) => c.type === "phone").map((c) => ({ value: c.value, pageUrl: home.finalUrl })),
+      socials: extractSocials(hrefs).map((s) => ({ ...s, pageUrl: home.finalUrl })),
+      pagesCrawled: 1,
     };
   }
 
-  const $ = cheerio.load(home.html);
+  const html = home.html ?? "";
+  const $ = cheerio.load(html);
   const title = $("title").first().text().trim().slice(0, 300) || null;
   const metaDescription =
     ($('meta[name="description"]').attr("content") || "").trim().slice(0, 500) || null;
@@ -223,27 +346,19 @@ export async function enrichWebsite(website: string, opts?: { maxPages?: number;
     base = new URL(home.finalUrl);
   } catch {
     errors.push("Invalid final URL after redirects");
-    return {
-      title, metaDescription, summary, emails: [], phones: [], socials: [],
-      pagesCrawled: 0, rendered: home.rendered, errors,
-    };
+    return { ...blank, title, metaDescription, summary, rendered: home.rendered };
   }
 
+  // Candidate internal pages: nav links + sitemap + common paths.
   const candidates: { url: string; type: string }[] = [];
   const seenCand = new Set<string>();
-  for (const h of hrefs) {
-    let abs = "";
-    try {
-      abs = new URL(h, base).toString();
-    } catch {
-      continue;
-    }
+  const consider = (abs: string) => {
     try {
       const u = new URL(abs);
-      if (u.hostname !== base.hostname) continue;
+      if (u.hostname !== base.hostname) return;
       u.hash = "";
       const norm = u.toString();
-      if (seenCand.has(norm)) continue;
+      if (seenCand.has(norm)) return;
       const p = u.pathname.toLowerCase();
       for (const want of PRIORITY_PATHS) {
         if (p.includes(want)) {
@@ -252,14 +367,40 @@ export async function enrichWebsite(website: string, opts?: { maxPages?: number;
           break;
         }
       }
-      if (candidates.length >= maxPages * 2) break;
+    } catch {
+      /* ignore */
+    }
+  };
+  for (const h of hrefs) {
+    try {
+      consider(new URL(h, base).toString());
     } catch {
       continue;
     }
+    if (candidates.length >= maxPages * 2) break;
+  }
+  for (const s of await discoverSitemapUrls(base, jar, maxPages * 2)) {
+    consider(s.url);
+    if (candidates.length >= maxPages * 2) break;
   }
   const rank = (t: string) => (t === "contact" ? 0 : t === "about" ? 1 : 2);
   candidates.sort((a, b) => rank(a.type) - rank(b.type));
   const toCrawl = [{ url: home.finalUrl, type: "home" }, ...candidates.slice(0, maxPages - 1)];
+  // Common-path probing when navigation yields no contact/about page.
+  const hasContact = toCrawl.some((c) => c.type === "contact");
+  const hasAbout = toCrawl.some((c) => c.type === "about");
+  if (toCrawl.length < maxPages) {
+    for (const cp of COMMON_PATHS) {
+      if (toCrawl.length >= maxPages) break;
+      if (cp.type === "contact" && hasContact) continue;
+      if (cp.type === "about" && hasAbout) continue;
+      const abs = new URL(cp.path, base).toString();
+      if (!seenCand.has(abs)) {
+        seenCand.add(abs);
+        toCrawl.push({ url: abs, type: `${cp.type} (probe)` });
+      }
+    }
+  }
 
   const emails = new Map<string, { value: string; category: string; pageUrl: string }>();
   const phones = new Map<string, { value: string; pageUrl: string }>();
@@ -269,26 +410,33 @@ export async function enrichWebsite(website: string, opts?: { maxPages?: number;
 
   const seen = new Set<string>();
   let pagesCrawled = 0;
-  for (const c of toCrawl) {
-    if (seen.has(c.url)) continue;
-    seen.add(c.url);
-    let fetched: { html: string; finalUrl: string } | null = null;
-    if (c.type === "home") {
-      fetched = home;
-    } else {
-      try {
-        fetched = await fetchStatic(c.url, timeoutMs);
-      } catch (e: unknown) {
-        errors.push(`${c.type} page failed: ${e instanceof Error ? e.message : "fetch failed"}`);
-        continue;
-      }
-    }
-    if (!fetched) continue;
-    pagesCrawled++;
-    if (c.type === "about") aboutUrl = fetched.finalUrl;
-    if (c.type === "contact") contactUrl = fetched.finalUrl;
 
-    const contacts = extractContactsFromHtml(fetched.html, fetched.finalUrl);
+  const absorb = (
+    fetched: { html?: string; markdown?: string; finalUrl: string },
+    type: string
+  ) => {
+    pagesCrawled++;
+    if (type === "about") aboutUrl = fetched.finalUrl;
+    if (type === "contact" || type === "contact (probe)") contactUrl = fetched.finalUrl;
+    if (fetched.markdown) {
+      const { contacts, hrefs: mdHrefs } = extractFromMarkdown(fetched.markdown, fetched.finalUrl);
+      for (const k of contacts) {
+        if (k.type === "email" && k.normalized && !emails.has(k.normalized)) {
+          emails.set(k.normalized, { value: k.value, category: k.category, pageUrl: fetched.finalUrl });
+        }
+        if (k.type === "phone" && k.normalized && !phones.has(k.normalized)) {
+          phones.set(k.normalized, { value: k.value, pageUrl: fetched.finalUrl });
+        }
+      }
+      for (const s of extractSocials(mdHrefs)) {
+        if (!socials.has(`${s.platform}|${s.url}`)) {
+          socials.set(`${s.platform}|${s.url}`, { ...s, pageUrl: fetched.finalUrl });
+        }
+      }
+      return;
+    }
+    const pageHtml = fetched.html ?? "";
+    const contacts = extractContactsFromHtml(pageHtml, fetched.finalUrl);
     for (const k of contacts) {
       if (k.type === "email" && k.normalized && !emails.has(k.normalized)) {
         emails.set(k.normalized, { value: k.value, category: k.category, pageUrl: fetched.finalUrl });
@@ -297,24 +445,42 @@ export async function enrichWebsite(website: string, opts?: { maxPages?: number;
         phones.set(k.normalized, { value: k.value, pageUrl: fetched.finalUrl });
       }
     }
-    const $$ = cheerio.load(fetched.html);
-    const pageHrefs = $$("a[href]")
-      .map((_, el) => {
-        try {
-          return new URL($$(el).attr("href") ?? "", fetched!.finalUrl).toString();
-        } catch {
-          return "";
-        }
-      })
-      .get()
-      .filter(Boolean);
-    for (const h of pageHrefs) {
+    const $$ = cheerio.load(pageHtml);
+    const mergeSocial = (h: string) => {
       const d = detectSocialPlatform(h);
       if (d && !socials.has(`${d.platform}|${d.profileUrl}`)) {
         socials.set(`${d.platform}|${d.profileUrl}`, { platform: d.platform, url: d.profileUrl, pageUrl: fetched.finalUrl });
       }
+    };
+    for (const h of [...absoluteHrefs($$, fetched.finalUrl), ...relMeHrefs($$, fetched.finalUrl)]) mergeSocial(h);
+    for (const h of extractJsonLdSocials(pageHtml)) mergeSocial(h);
+  };
+
+  // Homepage content (already fetched)
+  absorb(
+    home.markdown ? { markdown: home.markdown, finalUrl: home.finalUrl } : { html, finalUrl: home.finalUrl },
+    "home"
+  );
+
+  // Subpages with bounded concurrency + politeness
+  const subs = toCrawl.filter((c) => c.type !== "home" && !seen.has(c.url));
+  subs.forEach((c) => seen.add(c.url));
+  await runPool(subs, concurrency(), async (c) => {
+    const start = Date.now();
+    try {
+      const host = new URL(c.url).hostname;
+      await politeDelay(host);
+      const fetched = await fetchPageOnce(c.url, timeoutMs, jar, { referer: home.finalUrl });
+      pageStats.push({ url: c.url, status: fetched.viaReader ? "reader" : fetched.rendered ? "rendered" : "ok", ms: Date.now() - start });
+      absorb(fetched, c.type);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "fetch failed";
+      pageStats.push({ url: c.url, status: /not found/i.test(msg) ? "skipped" : "failed", ms: Date.now() - start, note: msg.slice(0, 120) });
+      if (!/not found/i.test(msg)) {
+        errors.push(`${c.type} page failed: ${msg.slice(0, 160)}`);
+      }
     }
-  }
+  });
 
   return {
     title,
@@ -328,5 +494,7 @@ export async function enrichWebsite(website: string, opts?: { maxPages?: number;
     contactUrl,
     rendered: home.rendered,
     errors,
+    pageStats,
   };
 }
+

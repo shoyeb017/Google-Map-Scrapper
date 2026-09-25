@@ -98,13 +98,65 @@ export function toCsv(rows: Record<string, string | number>[], columns: string[]
   return [cols.join(","), ...rows.map((r) => cols.map((c) => esc(r[c] ?? "")).join(","))].join("\n");
 }
 
+const LINK_COLUMNS = new Set([
+  "Website",
+  "About URL",
+  "Contact URL",
+  "Facebook",
+  "LinkedIn",
+  "Instagram",
+  "YouTube",
+  "X",
+  "TikTok",
+  "WhatsApp",
+  "Telegram",
+  "Maps URL",
+  "Source URL",
+]);
+
+function asLink(value: string | number) {
+  const text = String(value ?? "").trim();
+  if (!text) return { value: "" };
+  const url = /^https?:\/\//i.test(text) ? text : text.includes(".") && !text.includes(" ") ? `https://${text}` : "";
+  if (!url) return { value: text };
+  try {
+    new URL(url);
+  } catch {
+    return { value: text };
+  }
+  return {
+    text,
+    hyperlink: url,
+    tooltip: url,
+    font: { color: { argb: "FF0A7075" }, underline: true },
+  };
+}
+
 export async function toXlsx(rows: Record<string, string | number>[], columns: string[]): Promise<Buffer> {
   const ExcelJS = (await import("exceljs")).default;
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Businesses");
   const cols = columns.length ? columns : [...EXPORT_COLUMNS];
   ws.columns = cols.map((c) => ({ header: c, key: c, width: 22 }));
-  for (const r of rows) ws.addRow(r);
+  for (const r of rows) {
+    const row = ws.addRow(r);
+    cols.forEach((c, i) => {
+      if (LINK_COLUMNS.has(c)) {
+        const cell = row.getCell(i + 1);
+        const linked = asLink(r[c] ?? "");
+        if (typeof linked !== "string" && "hyperlink" in linked) {
+          cell.value = linked as never;
+        }
+      }
+      if (c === "Email" || c === "Additional Emails") {
+        const first = String(r[c] ?? "").split(";")[0].trim();
+        if (first && first.includes("@")) {
+          const cell = row.getCell(i + 1);
+          cell.value = { text: String(r[c] ?? ""), hyperlink: `mailto:${first}` } as never;
+        }
+      }
+    });
+  }
   ws.getRow(1).font = { bold: true };
   const buf = await wb.xlsx.writeBuffer();
   return Buffer.from(buf as ArrayBuffer);

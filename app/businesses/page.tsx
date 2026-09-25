@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Building2, Download, Filter, Mail, Phone, RefreshCw, Search, Globe, Trash2, Zap } from "lucide-react";
+import { Building2, Download, Filter, Mail, MapPin, Phone, RefreshCw, Search, Globe, Trash2, Zap } from "lucide-react";
 import {
   Badge,
   Button,
@@ -26,6 +26,7 @@ interface Biz {
   website?: string;
   city?: string;
   country?: string;
+  mapsUrl?: string;
   sourceProvider: string;
   providers?: string[];
   socialLinks?: { platform: string; url: string }[];
@@ -233,6 +234,7 @@ export default function BusinessesPage() {
                     <th className="px-3 py-3">Contact</th>
                     <th className="px-3 py-3">Website</th>
                     <th className="px-3 py-3">Socials</th>
+                    <th className="px-3 py-3">Map</th>
                     <th className="px-3 py-3">Location</th>
                     <th className="px-3 py-3">Provider</th>
                     <th className="px-3 py-3">Complete</th>
@@ -268,6 +270,19 @@ export default function BusinessesPage() {
                       </td>
                       <td className="whitespace-nowrap px-3 py-3">
                         <SocialIcons links={b.socialLinks} />
+                      </td>
+                      <td className="px-3 py-3">
+                        {b.mapsUrl ? (
+                          <a
+                            href={b.mapsUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            title="Open map location in new tab"
+                            className="flex h-8 w-8 items-center justify-center rounded-lg text-teal-600 transition hover:bg-teal-50 dark:text-teal-400 dark:hover:bg-teal-500/10"
+                          >
+                            <MapPin className="h-4 w-4" />
+                          </a>
+                        ) : <span className="text-xs text-slate-300 dark:text-slate-600">—</span>}
                       </td>
                       <td className="max-w-40 truncate px-3 py-3 text-xs text-slate-600 dark:text-slate-300">
                         {[b.city, b.country].filter(Boolean).join(", ") || "—"}
@@ -324,7 +339,20 @@ export default function BusinessesPage() {
                     </div>
                     <div className="mt-2 flex items-center justify-between gap-2">
                       <ProviderBadge provider={(b.providers ?? [b.sourceProvider])[0] ?? b.sourceProvider} />
-                      <SocialIcons links={b.socialLinks} iconClass="h-[18px] w-[18px]" />
+                      <span className="flex items-center gap-2">
+                        {b.mapsUrl ? (
+                          <a
+                            href={b.mapsUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            title="Open map location in new tab"
+                            className="inline-flex items-center gap-1 rounded-lg bg-teal-50 px-2 py-1 text-[11px] font-medium text-teal-700 transition hover:bg-teal-100 dark:bg-teal-500/10 dark:text-teal-300"
+                          >
+                            <MapPin className="h-3.5 w-3.5" /> Maps
+                          </a>
+                        ) : null}
+                        <SocialIcons links={b.socialLinks} iconClass="h-[18px] w-[18px]" />
+                      </span>
                     </div>
                     <div className="mt-1.5 flex justify-end">
                       <Completeness value={b.completenessScore ?? 0} />
