@@ -72,7 +72,7 @@ export async function startSession(): Promise<{ sessionId: string; viewport: typ
   try {
     ({ chromium } = await import("playwright"));
   } catch {
-    throw new ProviderError("NOT_CONFIGURED", 'Playwright is not installed. Run "npx playwright install chromium".');
+    throw new ProviderError("NOT_CONFIGURED", "Playwright could not be loaded by the server. Make sure it is included in production dependencies and redeploy.");
   }
   let browser: Browser;
   try {

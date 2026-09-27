@@ -50,4 +50,4 @@ No reviews are collected, stored, displayed, or exported — by schema design.
 
 ## Deployment
 
-Vercel (web) + Supabase (db) + any managed Node worker for Playwright/enrichment. No Docker required. Windows-compatible.
+The normal web app can run on Vercel with Supabase. The interactive **Map Scraper** keeps a live Playwright browser session in server memory, so deploy that feature on a long-running Node.js host with Chromium installed; serverless functions can lose the session between requests. Install production dependencies (`npm ci`) and Chromium (`npx playwright install chromium`) in the host's build/setup step. Keep the Map Scraper routes on the same running Node process. No Docker required. Windows-compatible.
