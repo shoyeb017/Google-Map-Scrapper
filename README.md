@@ -50,4 +50,6 @@ No reviews are collected, stored, displayed, or exported — by schema design.
 
 ## Deployment
 
-The normal web app can run on Vercel with Supabase. The interactive **Map Scraper** keeps a live Playwright browser session in server memory, so deploy that feature on a long-running Node.js host with Chromium installed; serverless functions can lose the session between requests. Install production dependencies (`npm ci`) and Chromium (`npx playwright install chromium`) in the host's build/setup step. Keep the Map Scraper routes on the same running Node process. No Docker required. Windows-compatible.
+The normal web app can run on Vercel with Supabase. For the Map Scraper's Chromium binary on Vercel, set `PLAYWRIGHT_BROWSERS_PATH=0` in Project Settings → Environment Variables and use this Build Command: `PLAYWRIGHT_BROWSERS_PATH=0 npx playwright install chromium --only-shell && npm run build`. The Next.js tracing config includes the downloaded headless shell in the map-session route bundle. Playwright requires the browser build matching its installed version, so rerun this install whenever Playwright changes.
+
+The interactive **Map Scraper** keeps a live Playwright browser session in server memory, while its UI calls several API routes. Vercel deploys those routes as functions, so the in-memory browser session cannot be relied on across them. For reliable live Map Scraper use, deploy the app on a long-running Node.js host that keeps those routes in the same process, with Chromium installed. No Docker required. Windows-compatible.
