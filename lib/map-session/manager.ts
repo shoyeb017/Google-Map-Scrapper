@@ -71,8 +71,9 @@ export async function startSession(): Promise<{ sessionId: string; viewport: typ
   let chromium: typeof import("playwright").chromium;
   try {
     ({ chromium } = await import("playwright"));
-  } catch {
-    throw new ProviderError("NOT_CONFIGURED", "Playwright could not be loaded by the server. Make sure it is included in production dependencies and redeploy.");
+  } catch (e: unknown) {
+    const detail = e instanceof Error ? e.message : String(e);
+    throw new ProviderError("NOT_CONFIGURED", `Playwright could not be loaded by the server: ${detail}`);
   }
   let browser: Browser;
   try {
