@@ -1,5 +1,5 @@
 "use client";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import {
@@ -9,7 +9,10 @@ import {
   Download,
   Globe,
   MousePointerClick,
+  Plus,
+  Trash2,
   Wand2,
+  X,
   Zap,
 } from "lucide-react";
 import {
@@ -81,6 +84,169 @@ function SearchForm() {
   const [lines, setLines] = useState<StreamLine[]>([]);
   const [startedAt, setStartedAt] = useState<number | null>(null);
   const [streamed, setStreamed] = useState(false);
+
+  // ---- Bulk scrape: table of scrape rows, one shared discovery method ----
+  interface BulkRow {
+    id: string;
+    keyword: string;
+    category: string;
+    locationText: string;
+    radiusMeters: number;
+    limit: number;
+    status: "pending" | "running" | "done" | "error";
+    saved?: number;
+    jobId?: string;
+    message?: string;
+  }
+  const BULK_KEY = "leadscraper.bulkRows";
+  const [bulkRows, setBulkRows] = useState<BulkRow[]>([]);
+  const [bulkRunning, setBulkRunning] = useState(false);
+  const [bulkLines, setBulkLines] = useState<StreamLine[]>([]);
+  const [bulkStartedAt, setBulkStartedAt] = useState<number | null>(null);
+  const bulkStop = useRef(false);
+
+  function newBulkId() {
+    return `bulk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  }
+
+  // Restore saved bulk table — a ?bulk= link from Saved Scrapings wins over storage.
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(BULK_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw) as BulkRow[];
+        if (Array.isArray(saved)) {
+          setBulkRows(saved.slice(0, 50).map((r) => ({ ...r, status: "pending" as const, saved: undefined, jobId: undefined, message: undefined })));
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      const param = sp.get("bulk");
+      if (param) {
+        const arr = JSON.parse(param) as Partial<BulkRow>[];
+        if (Array.isArray(arr) && arr.length) {
+          setBulkRows(
+            arr.slice(0, 50).map((r) => ({
+              id: newBulkId(),
+              keyword: String(r.keyword ?? ""),
+              category: String(r.category ?? ""),
+              locationText: String(r.locationText ?? ""),
+              radiusMeters: Number(r.radiusMeters) || 10000,
+              limit: Number(r.limit) || 20,
+              status: "pending" as const,
+            }))
+          );
+        }
+      }
+    } catch {
+      /* bad link — keep stored table */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        BULK_KEY,
+        JSON.stringify(bulkRows.map(({ id, keyword, category, locationText, radiusMeters, limit }) => ({ id, keyword, category, locationText, radiusMeters, limit })))
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [bulkRows]);
+
+  function setBulkRow(id: string, patch: Partial<BulkRow>) {
+    setBulkRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  }
+
+  function addBulkRow(fromCurrent = false) {
+    setBulkRows((prev) => [
+      ...prev.slice(0, 49),
+      {
+        id: newBulkId(),
+        keyword: fromCurrent ? form.keyword : "",
+        category: fromCurrent ? form.category : "",
+        locationText: fromCurrent ? form.locationText : prev[prev.length - 1]?.locationText ?? form.locationText,
+        radiusMeters: fromCurrent ? Number(form.radiusMeters) || 10000 : 10000,
+        limit: fromCurrent ? Number(form.limit) || 20 : 20,
+        status: "pending",
+      },
+    ]);
+  }
+
+  function removeBulkRow(id: string) {
+    setBulkRows((prev) => prev.filter((r) => r.id !== id));
+  }
+
+  // Run every valid row one by one with the shared discovery method + enrichment.
+  async function runBulk() {
+    if (bulkRunning) return;
+    const valid = bulkRows.filter((r) => r.keyword.trim() && r.locationText.trim());
+    if (!valid.length) return;
+    // Flag empty rows so the user sees what was skipped.
+    setBulkRows((prev) => prev.map((r) => (r.keyword.trim() && r.locationText.trim() ? { ...r, status: "pending" as const, saved: undefined, jobId: undefined, message: undefined } : { ...r, status: "error" as const, message: "Keyword + location required" })));
+    bulkStop.current = false;
+    setBulkRunning(true);
+    setBulkLines([]);
+    setBulkStartedAt(Date.now());
+    const push = (text: string, tone: StreamTone = "info") =>
+      setBulkLines((prev) => [...prev.slice(-250), nextLine(text, tone)]);
+    push(`Bulk scrape: ${valid.length} scraping${valid.length === 1 ? "" : "s"} — one by one via ${form.discoveryProvider.replace(/_/g, " ")}…`, "stage");
+    let done = 0;
+    let totalSaved = 0;
+    for (let i = 0; i < valid.length; i++) {
+      if (bulkStop.current) {
+        push(`Stopped — ${valid.length - i} remaining row${valid.length - i === 1 ? "" : "s"} left pending.`, "warn");
+        break;
+      }
+      const row = valid[i];
+      setBulkRow(row.id, { status: "running" });
+      push(`[${i + 1}/${valid.length}] “${row.keyword.trim()}” in ${row.locationText.trim()}…`, "stage");
+      const q = new URLSearchParams({
+        keyword: row.keyword.trim(),
+        category: row.category.trim(),
+        location: row.locationText.trim(),
+        radius: String(Math.min(100000, Math.max(100, Number(row.radiusMeters) || 10000))),
+        limit: String(Math.min(500, Math.max(1, Number(row.limit) || 20))),
+        mode: form.discoveryProvider,
+        primary: form.primaryProvider,
+        fallback: form.fallbackProvider,
+        enrich: form.enrichWebsite ? "1" : "0",
+        social: form.discoverSocial ? "1" : "0",
+        contacts: form.discoverContacts ? "1" : "0",
+      });
+      try {
+        const res = await fetch(`/api/search/stream?${q.toString()}`);
+        let saved = 0;
+        let jobId: string | undefined;
+        await readSSEStream(
+          res,
+          (e) => {
+            const t = String(e.t ?? "");
+            if (t === "done") {
+              saved = Number(e.totalSaved ?? 0);
+              jobId = typeof e.jobId === "string" ? e.jobId : undefined;
+            } else if (t === "error") {
+              throw new Error(String(e.message ?? "Search failed"));
+            }
+          },
+          ({ text, tone }) => push(`[${i + 1}/${valid.length}] ${text}`, tone)
+        );
+        done++;
+        totalSaved += saved;
+        setBulkRow(row.id, { status: "done", saved, jobId, message: `${saved} leads saved` });
+        push(`[${i + 1}/${valid.length}] ✓ “${row.keyword.trim()}” — ${saved} leads saved`, "ok");
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : "Search failed";
+        setBulkRow(row.id, { status: "error", message: msg });
+        push(`[${i + 1}/${valid.length}] ✕ “${row.keyword.trim()}” — ${msg}`, "error");
+      }
+    }
+    push(`Bulk done — ${done}/${valid.length} scrapings finished, ${totalSaved} leads saved in total.`, done === valid.length ? "ok" : "warn");
+    setBulkRunning(false);
+  }
 
   useEffect(() => {
     const get = (k: string) => sp.get(k);
@@ -375,6 +541,138 @@ function SearchForm() {
           ) : null}
         </div>
       </div>
+
+      {/* Bulk scrape */}
+      <Section
+        title="Bulk scrape"
+        subtitle="Add rows like a table — one discovery method above applies to all, rows run one by one"
+        className="animate-fade-up-3"
+        action={
+          <div className="flex gap-1.5 text-xs">
+            <button onClick={() => addBulkRow(true)} className="rounded-lg bg-slate-100 dark:bg-slate-800 px-2.5 py-1.5 font-medium hover:bg-slate-200 dark:hover:bg-slate-700">
+              + Current form
+            </button>
+            <button onClick={() => addBulkRow(false)} className="rounded-lg bg-slate-100 dark:bg-slate-800 px-2.5 py-1.5 font-medium hover:bg-slate-200 dark:hover:bg-slate-700">
+              + Empty row
+            </button>
+          </div>
+        }
+      >
+        {bulkRows.length === 0 ? (
+          <p className="text-sm text-slate-500 dark:text-slate-400">
+            No bulk rows yet — add rows (keyword + location each), keep the shared discovery method & enrichment above, then run. Each row becomes its own scraped pack.
+          </p>
+        ) : (
+          <div className="slim-scroll overflow-x-auto rounded-xl border border-slate-200/80 dark:border-slate-800">
+            <table className="dtable min-w-[760px]">
+              <thead>
+                <tr>
+                  <th className="px-3 py-2">#</th>
+                  <th className="px-3 py-2">Keyword *</th>
+                  <th className="px-3 py-2">Category</th>
+                  <th className="px-3 py-2">Location *</th>
+                  <th className="px-3 py-2">Radius (m)</th>
+                  <th className="px-3 py-2">Max</th>
+                  <th className="px-3 py-2">Status</th>
+                  <th className="px-3 py-2"><span className="sr-only">Remove</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {bulkRows.map((r, i) => (
+                  <tr key={r.id} className={cn(r.status === "running" ? "row-selected" : "")}>
+                    <td className="px-3 py-1.5 tabular-nums text-slate-500">{i + 1}</td>
+                    <td className="min-w-36 px-1.5 py-1.5">
+                      <Input value={r.keyword} disabled={bulkRunning} onChange={(e) => setBulkRow(r.id, { keyword: e.target.value })} placeholder="Restaurants" className="h-9 py-1.5 text-sm" />
+                    </td>
+                    <td className="min-w-32 px-1.5 py-1.5">
+                      <Input value={r.category} disabled={bulkRunning} onChange={(e) => setBulkRow(r.id, { category: e.target.value })} placeholder="Optional" className="h-9 py-1.5 text-sm" />
+                    </td>
+                    <td className="min-w-44 px-1.5 py-1.5">
+                      <Input value={r.locationText} disabled={bulkRunning} onChange={(e) => setBulkRow(r.id, { locationText: e.target.value })} placeholder="Dhaka, Bangladesh" className="h-9 py-1.5 text-sm" />
+                    </td>
+                    <td className="w-28 px-1.5 py-1.5">
+                      <Input type="number" min={100} max={100000} disabled={bulkRunning} value={r.radiusMeters} onChange={(e) => setBulkRow(r.id, { radiusMeters: Number(e.target.value) || 0 })} className="h-9 py-1.5 text-sm" />
+                    </td>
+                    <td className="w-20 px-1.5 py-1.5">
+                      <Input type="number" min={1} max={500} disabled={bulkRunning} value={r.limit} onChange={(e) => setBulkRow(r.id, { limit: Number(e.target.value) || 0 })} className="h-9 py-1.5 text-sm" />
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-xs">
+                      {r.status === "pending" ? <span className="text-slate-400">pending</span> : null}
+                      {r.status === "running" ? <Badge tone="amber">running…</Badge> : null}
+                      {r.status === "done" ? (
+                        <span className="flex items-center gap-1.5">
+                          <Badge tone="green">✓ {r.saved} saved</Badge>
+                          {r.jobId ? <Link href={`/jobs/${r.jobId}`} className="font-medium text-teal-600 hover:underline">pack →</Link> : null}
+                        </span>
+                      ) : null}
+                      {r.status === "error" ? <span title={r.message} className="font-medium text-rose-600">✕ {r.message?.slice(0, 40) ?? "error"}</span> : null}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <button
+                        aria-label="Remove row"
+                        disabled={bulkRunning}
+                        onClick={() => removeBulkRow(r.id)}
+                        className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {bulkRows.length > 0 ? (
+          <div className="mt-3">
+            <div className="mb-1 flex justify-between text-xs text-slate-500 dark:text-slate-400">
+              <span>
+                {bulkRows.filter((r) => r.status === "done" || r.status === "error").length}/{bulkRows.length} rows finished
+                {bulkRunning ? " — running one by one…" : ""}
+              </span>
+              <span className="tabular-nums">
+                {Math.round((bulkRows.filter((r) => r.status === "done" || r.status === "error").length / Math.max(1, bulkRows.length)) * 100)}%
+              </span>
+            </div>
+            <ProgressBar
+              value={bulkRows.filter((r) => r.status === "done" || r.status === "error").length}
+              max={Math.max(1, bulkRows.length)}
+            />
+            <div className="mt-3 flex flex-wrap gap-2">
+              {!bulkRunning ? (
+                <>
+                  <Button onClick={runBulk} disabled={!bulkRows.some((r) => r.keyword.trim() && r.locationText.trim()) || loading} className="px-6">
+                    <Zap className="h-4 w-4" /> Start bulk ({bulkRows.filter((r) => r.keyword.trim() && r.locationText.trim()).length} valid)
+                  </Button>
+                  <Button variant="secondary" onClick={() => setBulkRows([])}>
+                    Clear table
+                  </Button>
+                </>
+              ) : (
+                <Button variant="danger" onClick={() => { bulkStop.current = true; }}>
+                  <X className="h-4 w-4" /> Stop after current
+                </Button>
+              )}
+              <span className="inline-flex items-center text-xs text-slate-500 dark:text-slate-400">
+                <Plus className="mr-1 h-3.5 w-3.5" /> Method + enrichment toggles above apply to every row
+              </span>
+            </div>
+          </div>
+        ) : null}
+
+        {(bulkRunning || bulkLines.length > 0) ? (
+          <div className="mt-3">
+            <StreamTerminal
+              title="BULK SCRAPE — one by one"
+              lines={bulkLines}
+              running={bulkRunning}
+              startedAt={bulkStartedAt}
+              progress={{ done: bulkRows.filter((r) => r.status === "done" || r.status === "error").length, total: bulkRows.length }}
+            />
+          </div>
+        ) : null}
+      </Section>
 
       {/* Results preview */}
       {businesses.length > 0 ? (

@@ -36,9 +36,12 @@ export const EXPORT_COLUMNS = [
   "Reviews Count",
   "Provider",
   "Source URL",
+  "Pack Names",
   "Completeness",
   "Last Verified",
 ] as const;
+
+export type ExportRow = Record<string, string | number>;
 
 function socialOf(b: PersistedBusiness, platform: string): string {
   const links = (b as unknown as { socialLinks?: { platform: string; url: string }[] }).socialLinks ?? [];
@@ -46,13 +49,13 @@ function socialOf(b: PersistedBusiness, platform: string): string {
   return links.filter((s) => s.platform === platform).map((s) => s.url).join(", ");
 }
 
-export function businessToRow(b: PersistedBusiness): Record<string, string | number> {
+export function businessToRow(b: PersistedBusiness, packName?: string): Record<string, string | number> {
   const phones = b.phones ?? [];
   const emails = b.emails ?? [];
   return {
     "Business Name": b.name ?? "",
     Category: b.primaryCategory ?? "",
-    Subcategories: (b.secondaryCategories ?? []).join("; "),
+    Subcategories: (b.secondaryCategories ?? []).join(", "),
     Description: b.description ?? "",
     Phone: phones[0] ?? "",
     "Additional Phones": phones.slice(1).join(", "),
@@ -79,15 +82,75 @@ export function businessToRow(b: PersistedBusiness): Record<string, string | num
     Longitude: b.longitude ?? "",
     "Maps URL": b.mapsUrl ?? "",
     "Place ID": b.placeId ?? "",
-    "Opening Hours": (b.openingHours ?? []).join(" | "),
+    "Opening Hours": (b.openingHours ?? []).join(", "),
     "Business Status": (b as unknown as { businessStatus?: string }).businessStatus ?? "",
     Rating: (b as unknown as { rating?: number }).rating ?? "",
     "Reviews Count": (b as unknown as { reviewsCount?: number }).reviewsCount ?? "",
-    Provider: (b.providers ?? [b.sourceProvider]).join("+"),
+    Provider: (b.providers ?? [b.sourceProvider]).join(", "),
     "Source URL": b.sourceUrl ?? "",
+    "Pack Names": packName ?? (b as unknown as { searchJobKeyword?: string }).searchJobKeyword ?? "",
     Completeness: b.completenessScore ?? 0,
     "Last Verified": b.updatedAt ?? "",
   };
+}
+
+// Merge rows from several packs on a chosen column.
+// Every multi-value cell is unioned with ", " so no data is dropped.
+// Pack Names are always comma-joined across the merged packs.
+export function mergeExportRows(rows: ExportRow[], mergeKey: string): ExportRow[] {
+  if (!mergeKey || mergeKey === "none") return rows;
+  const norm = (v: unknown) => String(v ?? "").trim().toLowerCase();
+  const unionComma = (...cells: unknown[]) => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const c of cells) {
+      for (const part of String(c ?? "").split(",")) {
+        const t = part.trim();
+        const k = t.toLowerCase();
+        if (t && !seen.has(k)) {
+          seen.add(k);
+          out.push(t);
+        }
+      }
+    }
+    return out.join(", ");
+  };
+  const byKey = new Map<string, ExportRow>();
+  const order: string[] = [];
+  for (const r of rows) {
+    const k = norm(r[mergeKey]);
+    const key = k || `__blank_${order.length}`;
+    // Blank keys never merge — each keeps its own row.
+    if (!k) {
+      order.push(key);
+      byKey.set(key, { ...r });
+      continue;
+    }
+    const prev = byKey.get(key);
+    if (!prev) {
+      order.push(key);
+      byKey.set(key, { ...r });
+    } else {
+      const merged: ExportRow = { ...prev };
+      for (const col of Object.keys(r)) {
+        if (col === mergeKey) continue;
+        const a = prev[col];
+        const b = r[col];
+        if (String(b ?? "") === "") continue;
+        if (String(a ?? "") === "") {
+          merged[col] = b;
+        } else if (typeof a === "number" || typeof b === "number") {
+          merged[col] = unionComma(a, b);
+        } else {
+          merged[col] = unionComma(a, b);
+        }
+      }
+      // Pack Names always union even when it is the merge key.
+      merged["Pack Names"] = unionComma(prev["Pack Names"], r["Pack Names"]);
+      byKey.set(key, merged);
+    }
+  }
+  return order.map((k) => byKey.get(k)!);
 }
 
 export function toCsv(rows: Record<string, string | number>[], columns: string[]): string {

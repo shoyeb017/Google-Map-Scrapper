@@ -344,13 +344,14 @@ export class BrowserDiscoveryProvider implements DiscoveryProvider {
           await link.click({ timeout: 10000 });
           await page.locator('button[data-item-id="address"], a[data-item-id="authority"]').first().waitFor({ timeout: 15000 }).catch(() => undefined);
           await page.waitForTimeout(800);
-          // @ts-ignore
           const d = (await page.evaluate(() => {
-            function pick(sel) { var el = document.querySelector(sel); return (el && el.textContent || "").replace(/\s+/g, " ").trim(); }
-            var phoneRaw = pick('button[data-item-id*="phone"]') || (document.querySelector('button[aria-label*="Phone:"]') && document.querySelector('button[aria-label*="Phone:"]').getAttribute("aria-label") || "") || pick('button[aria-label*="Phone"]');
-            var address = pick('button[data-item-id="address"]') || (document.querySelector('button[aria-label^="Address:"]') && document.querySelector('button[aria-label^="Address:"]').getAttribute("aria-label") || "");
-            var webA = document.querySelector('a[data-item-id="authority"]') || document.querySelector('a[aria-label^="Website:"]') || document.querySelector('a[aria-label="Open website"]');
-            var hours = Array.from(document.querySelectorAll(".t39EBf span")).map(function(e) { return (e.textContent || "").trim(); }).filter(Boolean).slice(0, 14);
+            function pick(sel: string): string { var el = document.querySelector(sel); return ((el && el.textContent) || "").replace(/\s+/g, " ").trim(); }
+            var phoneEl = document.querySelector('button[aria-label*="Phone:"]');
+            var phoneRaw = pick('button[data-item-id*="phone"]') || ((phoneEl && phoneEl.getAttribute("aria-label")) || "") || pick('button[aria-label*="Phone"]');
+            var addrEl = document.querySelector('button[aria-label^="Address:"]');
+            var address = pick('button[data-item-id="address"]') || ((addrEl && addrEl.getAttribute("aria-label")) || "");
+            var webA = (document.querySelector('a[data-item-id="authority"]') || document.querySelector('a[aria-label^="Website:"]') || document.querySelector('a[aria-label="Open website"]')) as HTMLAnchorElement | null;
+            var hours = Array.from(document.querySelectorAll(".t39EBf span")).map(function(e) { return ((e.textContent as string) || "").trim(); }).filter(Boolean).slice(0, 14);
             return { phoneRaw: phoneRaw, address: address, website: webA ? webA.href : "", hours: hours };
           }).catch(() => null)) as { phoneRaw: string; address: string; website: string; hours: string[] } | null;
 

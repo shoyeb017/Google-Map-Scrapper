@@ -22,19 +22,47 @@ import {
 import { cn } from "@/lib/cn";
 import { ThemeToggle } from "@/components/theme";
 
-const NAV = [
+const NAV_SINGLE_TOP = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/search", label: "New Scraping", icon: Search },
-  { href: "/businesses", label: "Search", icon: Building2 },
+];
+
+const NAV_GROUPS = [
+  {
+    id: "scraping",
+    label: "Scraping",
+    icon: Search,
+    children: [
+      { href: "/search", label: "New Scraping", icon: Search },
+      { href: "/map-search", label: "Map Scraper", icon: MapPinned },
+    ],
+  },
+  {
+    id: "leads",
+    label: "Leads",
+    icon: Building2,
+    children: [
+      { href: "/businesses", label: "Business Search", icon: Building2 },
+      { href: "/jobs", label: "Packs Analysis", icon: Layers },
+    ],
+  },
+];
+
+const NAV_SINGLE_MID = [
   { href: "/map", label: "Map", icon: MapIcon },
-  { href: "/map-search", label: "Map Scraper", icon: MapPinned },
-  { href: "/jobs", label: "Scraped Packs", icon: Layers },
-  { href: "/exports", label: "Export Settings", icon: Download },
   { href: "/saved-searches", label: "Saved Scrapings", icon: Bookmark },
   { href: "/providers", label: "Providers", icon: Plug },
-  { href: "/settings", label: "Settings", icon: Settings },
   { href: "/logs", label: "Logs", icon: ScrollText },
 ];
+
+const NAV_SETTINGS_GROUP = {
+  id: "settings",
+  label: "Settings",
+  icon: Settings,
+  children: [
+    { href: "/exports", label: "Export Settings", icon: Download },
+    { href: "/settings", label: "App Settings", icon: Settings },
+  ],
+};
 
 function Brand() {
   return (
@@ -53,33 +81,101 @@ function Brand() {
   );
 }
 
+function isLinkActive(href: string, active: string) {
+  return href === "/" ? active === "/" : active === href || active.startsWith(href + "/");
+}
+
+function NavItem({ href, label, Icon, active, onNavigate }: { href: string; label: string; Icon: typeof Search; active: string; onNavigate?: () => void }) {
+  const isActive = isLinkActive(href, active);
+  return (
+    <Link
+      href={href}
+      onClick={onNavigate}
+      className={cn(
+        "group relative flex items-center gap-3 overflow-hidden rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200",
+        isActive
+          ? "bg-gradient-to-r from-teal-600 via-cyan-600 to-teal-600 text-white shadow-md shadow-teal-600/30 dark:shadow-teal-500/20"
+          : "text-slate-600 hover:translate-x-0.5 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800/80 dark:hover:text-white"
+      )}
+    >
+      {isActive ? <span className="absolute inset-0 animate-gradient bg-gradient-to-r from-transparent via-white/15 to-transparent" /> : null}
+      <Icon className={cn("h-[18px] w-[18px] shrink-0 transition-transform duration-200 group-hover:scale-110", isActive ? "" : "text-slate-400 group-hover:text-teal-500 dark:text-slate-500")} />
+      {label}
+      {isActive ? <span className="ml-auto h-1.5 w-1.5 animate-glow rounded-full bg-white" /> : null}
+    </Link>
+  );
+}
+
+function NavGroup({ id, label, Icon, children, active, onNavigate, defaultOpen }: { id: string; label: string; Icon: typeof Search; children: { href: string; label: string; icon: typeof Search }[]; active: string; onNavigate?: () => void; defaultOpen?: boolean }) {
+  const childActive = children.some((c) => isLinkActive(c.href, active));
+  // SSR-safe: server and first client render are always open.
+  // Saved closed state is applied after hydration, so no mismatch.
+  const [open, setOpen] = useState(true);
+  useEffect(() => {
+    if (childActive) {
+      setOpen(true);
+      return;
+    }
+    try {
+      if (window.localStorage.getItem(`leadscraper.nav.${id}`) === "closed") setOpen(false);
+    } catch {
+      /* ignore */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, childActive]);
+  function toggle() {
+    setOpen((v) => {
+      try {
+        window.localStorage.setItem(`leadscraper.nav.${id}`, v ? "closed" : "open");
+      } catch {
+        /* ignore */
+      }
+      return !v;
+    });
+  }
+  return (
+    <div className="flex flex-col gap-1">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={open}
+        className={cn(
+          "group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium transition",
+          childActive
+            ? "bg-teal-50 text-teal-800 ring-1 ring-inset ring-teal-200 dark:bg-teal-500/10 dark:text-teal-200 dark:ring-teal-500/30"
+            : "text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800/80"
+        )}
+      >
+        <Icon className="h-[18px] w-[18px] shrink-0 text-slate-400 group-hover:text-teal-500 dark:text-slate-500" />
+        {label}
+        <span className={cn("ml-auto text-xs transition-transform", open ? "rotate-180" : "")}>▾</span>
+      </button>
+      {open ? (
+        <div className="ml-4 flex flex-col gap-1 border-l-2 border-slate-100 pl-2 dark:border-slate-800">
+          {children.map((c) => (
+            <NavItem key={c.href} href={c.href} label={c.label} Icon={c.icon} active={active} onNavigate={onNavigate} />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function NavLinks({ onNavigate, active, animate }: { onNavigate?: () => void; active: string; animate?: boolean }) {
   return (
     <nav className="flex flex-col gap-1">
-      {NAV.map((n, i) => {
-        const isActive = n.href === "/" ? active === "/" : active === n.href || active.startsWith(n.href + "/");
-        const Icon = n.icon;
-        return (
-          <Link
-            key={n.href}
-            href={n.href}
-            onClick={onNavigate}
-            style={animate ? { animationDelay: `${Math.min(i * 35, 350)}ms` } : undefined}
-            className={cn(
-              "group relative flex items-center gap-3 overflow-hidden rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200",
-              animate && "animate-fade-up",
-              isActive
-                ? "bg-gradient-to-r from-teal-600 via-cyan-600 to-teal-600 text-white shadow-md shadow-teal-600/30 dark:shadow-teal-500/20"
-                : "text-slate-600 hover:translate-x-0.5 hover:bg-slate-100 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800/80 dark:hover:text-white"
-            )}
-          >
-            {isActive ? <span className="absolute inset-0 animate-gradient bg-gradient-to-r from-transparent via-white/15 to-transparent" /> : null}
-            <Icon className={cn("h-[18px] w-[18px] shrink-0 transition-transform duration-200 group-hover:scale-110", isActive ? "" : "text-slate-400 group-hover:text-teal-500 dark:text-slate-500")} />
-            {n.label}
-            {isActive ? <span className="ml-auto h-1.5 w-1.5 animate-glow rounded-full bg-white" /> : null}
-          </Link>
-        );
-      })}
+      <div className={cn(animate && "animate-fade-up")}>
+        {NAV_SINGLE_TOP.map((n) => (
+          <NavItem key={n.href} href={n.href} label={n.label} Icon={n.icon} active={active} onNavigate={onNavigate} />
+        ))}
+      </div>
+      {NAV_GROUPS.map((g) => (
+        <NavGroup key={g.id} id={g.id} label={g.label} Icon={g.icon} children={g.children} active={active} onNavigate={onNavigate} defaultOpen />
+      ))}
+      {NAV_SINGLE_MID.map((n) => (
+        <NavItem key={n.href} href={n.href} label={n.label} Icon={n.icon} active={active} onNavigate={onNavigate} />
+      ))}
+      <NavGroup id={NAV_SETTINGS_GROUP.id} label={NAV_SETTINGS_GROUP.label} Icon={NAV_SETTINGS_GROUP.icon} children={NAV_SETTINGS_GROUP.children} active={active} onNavigate={onNavigate} />
     </nav>
   );
 }

@@ -30,14 +30,22 @@ export const searchRequestSchema = z.object({
 export type SearchRequest = z.infer<typeof searchRequestSchema>;
 
 export const enrichRequestSchema = z.object({
-  businessIds: z.array(z.string().uuid()).min(1).max(100),
+  businessIds: z.array(z.string().min(1).max(100)).min(1).max(200),
   force: z.boolean().optional().default(false),
 });
 
 export const exportRequestSchema = z.object({
   format: z.enum(["csv", "xlsx"]).default("csv"),
   columns: z.array(z.string()).optional().default([]),
-  searchJobId: z.string().uuid().optional(),
-  selectedIds: z.array(z.string().uuid()).optional().default([]),
+  searchJobId: z.string().min(1).max(100).optional(),
+  selectedIds: z.array(z.string().min(1).max(100)).optional().default([]),
   filters: z.record(z.string(), z.string()).optional().default({}),
+});
+
+export const packsExportSchema = z.object({
+  format: z.enum(["csv", "xlsx"]).default("csv"),
+  jobIds: z.array(z.string().min(1).max(100)).min(1).max(20),
+  columns: z.array(z.string()).optional().default([]),
+  // Field used to merge duplicate rows across packs. "none" = keep every row.
+  mergeKey: z.string().optional().default("none"),
 });

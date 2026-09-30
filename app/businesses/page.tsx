@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Building2, Download, Filter, Mail, MapPin, Phone, RefreshCw, Search, Globe, Trash2, Zap } from "lucide-react";
 import {
@@ -35,22 +35,59 @@ interface Biz {
 
 const PAGE_SIZE = 20;
 
+const BIZ_FILTER_KEY = "leadscraper.bizFilters";
+
 export default function BusinessesPage() {
   const [items, setItems] = useState<Biz[]>([]);
   const [loading, setLoading] = useState(true);
   const [q, setQ] = useState("");
   const [provider, setProvider] = useState("");
   const [only, setOnly] = useState("");
+  const [city, setCity] = useState("");
+  const [country, setCountry] = useState("");
+  const [sort, setSort] = useState("newest");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [page, setPage] = useState(0);
   const [busy, setBusy] = useState<"enrich" | "csv" | "xlsx" | "delete" | null>(null);
+  // Quiet background refresh (no skeleton flash) for realtime typing.
+  const [refreshing, setRefreshing] = useState(false);
+  const firstLoad = useRef(true);
 
-  async function load() {
-    setLoading(true);
+  // Restore saved filter state.
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(BIZ_FILTER_KEY);
+      if (raw) {
+        const s = JSON.parse(raw) as Record<string, string>;
+        if (s.q) setQ(s.q);
+        if (s.provider) setProvider(s.provider);
+        if (s.only) setOnly(s.only);
+        if (s.city) setCity(s.city);
+        if (s.country) setCountry(s.country);
+        if (s.sort) setSort(s.sort);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(BIZ_FILTER_KEY, JSON.stringify({ q, provider, only, city, country, sort }));
+    } catch {
+      /* ignore */
+    }
+  }, [q, provider, only, city, country, sort]);
+
+  async function load(background = false) {
+    if (background) setRefreshing(true);
+    else setLoading(true);
     setPage(0);
     const p = new URLSearchParams();
     if (q) p.set("q", q);
     if (provider) p.set("provider", provider);
+    if (city) p.set("city", city);
+    if (country) p.set("country", country);
     if (only === "website") p.set("hasWebsite", "yes");
     if (only === "email") p.set("hasEmail", "yes");
     if (only === "phone") p.set("hasPhone", "yes");
@@ -61,7 +98,16 @@ export default function BusinessesPage() {
     } catch {
       setItems([]);
     }
-    setLoading(false);
+    if (background) setRefreshing(false);
+    else setLoading(false);
+  }
+
+  function clearFilters() {
+    setQ("");
+    setCity("");
+    setCountry("");
+    setProvider("");
+    setOnly("");
   }
 
   useEffect(() => {
@@ -69,8 +115,30 @@ export default function BusinessesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
-  const pageItems = useMemo(() => items.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE), [items, page]);
+  // Realtime dynamic search: reload quietly 500ms after typing/filters change.
+  // Sort is client-side so it applies instantly with no reload.
+  useEffect(() => {
+    if (firstLoad.current) {
+      firstLoad.current = false;
+      return;
+    }
+    const t = setTimeout(() => {
+      void load(true);
+    }, 500);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q, city, country, provider, only]);
+
+  const sorted = useMemo(() => {
+    const arr = [...items];
+    if (sort === "name") arr.sort((a, b) => (a.name ?? "").localeCompare(b.name ?? ""));
+    else if (sort === "city") arr.sort((a, b) => (a.city ?? "").localeCompare(b.city ?? ""));
+    else if (sort === "complete") arr.sort((a, b) => (b.completenessScore ?? 0) - (a.completenessScore ?? 0));
+    return arr;
+  }, [items, sort]);
+
+  const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  const pageItems = useMemo(() => sorted.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE), [sorted, page]);
 
   function toggle(id: string) {
     setSelected((s) => {
@@ -178,7 +246,7 @@ export default function BusinessesPage() {
 
       {/* Filters */}
       <div className="animate-fade-up-1 rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-3 shadow-sm sm:p-4">
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-[1fr_180px_180px_auto]">
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-[1fr_170px_170px_150px_150px_auto]">
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400 dark:text-slate-500" />
             <Input
@@ -189,6 +257,8 @@ export default function BusinessesPage() {
               className="pl-9"
             />
           </div>
+          <Input value={city} onChange={(e) => setCity(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} placeholder="City…" />
+          <Input value={country} onChange={(e) => setCountry(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} placeholder="Country…" />
           <Select value={provider} onChange={(e) => setProvider(e.target.value)}>
             <option value="">All providers</option>
             <option value="google_places">Google Places</option>
@@ -200,9 +270,29 @@ export default function BusinessesPage() {
             <option value="email">Has email</option>
             <option value="phone">Has phone</option>
           </Select>
-          <Button onClick={load} loading={loading} className="sm:col-span-2 lg:col-span-1">
+          <Select value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort businesses">
+            <option value="newest">Sort: Newest</option>
+            <option value="name">Sort: Name A–Z</option>
+            <option value="city">Sort: City A–Z</option>
+            <option value="complete">Sort: Most complete</option>
+          </Select>
+          <Button onClick={() => load()} loading={loading} className="sm:col-span-2 lg:col-span-1">
             <Filter className="h-4 w-4" /> Apply
           </Button>
+        </div>
+        <div className="mt-2 flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+          {refreshing ? (
+            <span className="inline-flex items-center gap-1.5">
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-teal-500 border-t-transparent" /> Searching…
+            </span>
+          ) : (
+            <span>{items.length} result{items.length === 1 ? "" : "s"} — updates as you type</span>
+          )}
+          {q || city || country || provider || only ? (
+            <button onClick={clearFilters} className="ml-auto rounded-lg bg-slate-100 px-2.5 py-1 font-medium hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700">
+              Clear filters
+            </button>
+          ) : null}
         </div>
       </div>
 
@@ -374,7 +464,7 @@ export default function BusinessesPage() {
 
       {/* Refresh */}
       <div className="flex justify-center">
-        <button onClick={load} className="inline-flex items-center gap-1.5 text-sm text-slate-500 dark:text-slate-400 hover:text-slate-800">
+        <button onClick={() => load()} className="inline-flex items-center gap-1.5 text-sm text-slate-500 dark:text-slate-400 hover:text-slate-800">
           <RefreshCw className="h-4 w-4" /> Refresh list
         </button>
       </div>

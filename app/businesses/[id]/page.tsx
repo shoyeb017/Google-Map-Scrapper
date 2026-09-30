@@ -388,6 +388,18 @@ export default function BusinessDetailPage() {  const { id } = useParams<{ id: s
               </Button>
               <Button
                 variant="secondary"
+                onClick={() => {
+                  setEnrich(null);
+                  void runEnrich();
+                }}
+                loading={enriching}
+                className="px-3 py-2 text-xs sm:px-4 sm:text-sm"
+                title="Force re-scrape: crawls the live website again even if already enriched"
+              >
+                <RefreshCw className="h-4 w-4" /> Force re-scrape
+              </Button>
+              <Button
+                variant="secondary"
                 onClick={() => (editingOverview ? setEditingOverview(false) : startOverviewEdit())}
                 className="px-3 py-2 text-xs sm:px-4 sm:text-sm"
               >

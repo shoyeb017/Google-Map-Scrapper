@@ -43,6 +43,39 @@ export default function SavedScrapingsPage() {
   const [items, setItems] = useState<Saved[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
+  function toggleSelect(id: string) {
+    setSelected((s) => {
+      const n = new Set(s);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  }
+
+  // Send selected recipes to New Scraping with the bulk table prefilled.
+  // Shared method comes from the first selected recipe.
+  function bulkHref(): string {
+    const picked = items.filter((s) => selected.has(s.id));
+    const rows = picked.map((s) => ({
+      keyword: s.keyword ?? "",
+      category: s.category ?? "",
+      locationText: s.locationText ?? "",
+      radiusMeters: s.radiusMeters ?? 10000,
+      limit: s.requestedLimit ?? 20,
+    }));
+    const p = new URLSearchParams();
+    p.set("bulk", JSON.stringify(rows));
+    const first = picked[0];
+    if (first?.discoveryProvider) p.set("mode", first.discoveryProvider);
+    if (first?.primaryProvider) p.set("primary", first.primaryProvider);
+    if (first?.fallbackProvider) p.set("fallback", first.fallbackProvider);
+    if (first?.enrichWebsite === false) p.set("enrich", "0");
+    if (first?.discoverSocial === false) p.set("social", "0");
+    if (first?.discoverContacts === false) p.set("contacts", "0");
+    return `/search?${p.toString()}`;
+  }
   const [form, setForm] = useState({
     name: "",
     keyword: "",
@@ -124,6 +157,11 @@ export default function SavedScrapingsPage() {
   }
 
   async function remove(s: Saved) {
+    setSelected((prev) => {
+      const n = new Set(prev);
+      n.delete(s.id);
+      return n;
+    });
     if (s.local || s.id.startsWith("local-")) {
       setItems((p) => p.filter((x) => x.id !== s.id));
       return;
@@ -134,11 +172,22 @@ export default function SavedScrapingsPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="animate-fade-up">
-        <h1 className="text-xl font-bold sm:text-2xl">Saved Scrapings</h1>
-        <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
-          Full scraping recipes — keyword, location, providers, limits and enrichment — stored in the database. One tap re-runs them with every setting prefilled.
-        </p>
+      <div className="animate-fade-up flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h1 className="text-xl font-bold sm:text-2xl">Saved Scrapings</h1>
+          <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
+            Full scraping recipes — keyword, location, providers, limits and enrichment — stored in the database. One tap re-runs them with every setting prefilled.
+            {selected.size > 0 ? ` · ${selected.size} selected` : ""}
+          </p>
+        </div>
+        {selected.size > 0 ? (
+          <Link
+            href={bulkHref()}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-teal-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-teal-700"
+          >
+            Send {selected.size} to bulk <ArrowRight className="h-4 w-4" />
+          </Link>
+        ) : null}
       </div>
 
       <Section title="Save a scraping" subtitle="Every field is stored and prefilled on re-run" className="animate-fade-up-1">
@@ -186,8 +235,15 @@ export default function SavedScrapingsPage() {
       ) : (
         <div className="stagger grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {items.map((s) => (
-            <div key={s.id} className="rounded-2xl border border-slate-200/80 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 shadow-sm">
+            <div key={s.id} className={`rounded-2xl border bg-white dark:bg-slate-900 p-4 shadow-sm ${selected.has(s.id) ? "border-teal-400 ring-2 ring-teal-100 dark:ring-teal-500/30" : "border-slate-200/80 dark:border-slate-800"}`}>
               <p className="flex items-center gap-2 font-semibold">
+                <input
+                  type="checkbox"
+                  checked={selected.has(s.id)}
+                  onChange={() => toggleSelect(s.id)}
+                  aria-label={`Select ${s.name} for bulk`}
+                  className="h-5 w-5 shrink-0 accent-teal-600"
+                />
                 <Bookmark className="h-4 w-4 shrink-0 text-teal-500" />
                 <span className="truncate">{s.name}</span>
                 {s.local ? <Badge tone="gray">this device</Badge> : null}

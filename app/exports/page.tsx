@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { CheckSquare, Download, FileSpreadsheet, FileText, Settings2 } from "lucide-react";
+import { CheckSquare, Download, FileSpreadsheet, FileText, Settings2, Square } from "lucide-react";
 import { Button, Section } from "@/components/ui";
 import { EXPORT_COLUMNS } from "@/lib/exports/exporter";
 import { loadExportColumns, saveExportColumnsAsync } from "@/lib/export-settings";
@@ -39,13 +39,20 @@ export default function ExportSettingsPage() {
 
   function toggle(c: string) {
     const next = cols.includes(c) ? cols.filter((x) => x !== c) : [...cols, c];
-    if (next.length === 0) return; // keep at least one column
-    void persist(next);
+    setCols(next);
+    // The database requires at least one column — persist only then.
+    // Zero is allowed in the UI so you can start fresh with "None".
+    if (next.length > 0) void persist(next);
   }
 
   function selectAll(on: boolean) {
     if (!on) return;
     void persist([...EXPORT_COLUMNS]);
+  }
+
+  function selectNone() {
+    // Clear the UI only (nothing to save until at least one is picked).
+    setCols([]);
   }
 
   async function download() {
@@ -92,7 +99,12 @@ export default function ExportSettingsPage() {
             <button onClick={() => selectAll(true)} className="inline-flex items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 px-2.5 py-1.5 font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700">
               <CheckSquare className="h-3.5 w-3.5" /> All
             </button>
-            <span className="inline-flex items-center px-1 text-slate-400 dark:text-slate-500">At least one column stays on</span>
+            <button onClick={selectNone} className="inline-flex items-center gap-1 rounded-lg bg-slate-100 dark:bg-slate-800 px-2.5 py-1.5 font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700">
+              <Square className="h-3.5 w-3.5" /> None
+            </button>
+            <span className="inline-flex items-center px-1 text-slate-400 dark:text-slate-500">
+              {cols.length === 0 ? "Nothing selected — pick at least one to save" : "At least one column must stay on to save"}
+            </span>
           </div>
         }
       >
@@ -149,7 +161,7 @@ export default function ExportSettingsPage() {
           })}
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-2">
-          <Button variant="success" onClick={download} loading={busy} className="px-6 py-2.5">
+          <Button variant="success" onClick={download} loading={busy} disabled={cols.length === 0} className="px-6 py-2.5">
             <Download className="h-4 w-4" /> Download all ({cols.length} columns)
           </Button>
           <span className="inline-flex items-center gap-1 text-xs text-slate-500 dark:text-slate-400">

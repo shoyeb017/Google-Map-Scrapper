@@ -27,6 +27,7 @@ import {
   Section,
   SkeletonList,
   SocialIcons,
+  Toggle,
   packKind,
   statusTone,
 } from "@/components/ui";
@@ -94,6 +95,7 @@ export default function PackageDetailPage() {
   const [findingMore, setFindingMore] = useState(false);
   const [moreLines, setMoreLines] = useState<StreamLine[]>([]);
   const [moreStartedAt, setMoreStartedAt] = useState<number | null>(null);
+  const [forceEnrich, setForceEnrich] = useState(false);
 
   const isSessionPack =
     (job?.providerAttempts ?? []).some((a) => a.provider === "browser_discovery" && a.status === "session-list");
@@ -200,7 +202,7 @@ export default function PackageDetailPage() {
     });
   }
 
-  async function enrich(ids: string[]) {
+  async function enrich(ids: string[], force?: boolean) {
     if (!ids.length || enriching) return;
     setBusy("enrich");
     setEnriching(true);
@@ -214,7 +216,7 @@ export default function PackageDetailPage() {
       const res = await fetch("/api/enrich/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ businessIds: ids }),
+        body: JSON.stringify({ businessIds: ids, force: force ?? forceEnrich }),
       });
       await readSSEStream(
         res,
@@ -356,13 +358,17 @@ export default function PackageDetailPage() {
       </div>
 
       {/* Package actions */}
-      <div className="animate-fade-up-1 hidden flex-wrap gap-2 lg:flex">
+      <div className="animate-fade-up-1 hidden flex-wrap items-center gap-2 lg:flex">
         <Button variant="dark" onClick={() => enrich(items.map((b) => b.id))} loading={busy === "enrich"} disabled={!items.length}>
           <Zap className="h-4 w-4" /> Enrich all ({items.length})
         </Button>
         <Button variant="dark" onClick={() => enrich(Array.from(selected))} disabled={!selected.size}>
           <Zap className="h-4 w-4" /> Enrich selected
         </Button>
+        <Button variant="secondary" onClick={() => enrich(items.map((b) => b.id), true)} loading={busy === "enrich"} disabled={!items.length}>
+          <Zap className="h-4 w-4" /> Force re-scrape all
+        </Button>
+        <Toggle checked={forceEnrich} onChange={setForceEnrich} label="Force (re-crawl even if done)" />
         <Button variant="success" onClick={() => download("csv", false)} loading={busy === "csv"}>
           <Download className="h-4 w-4" /> Pack CSV
         </Button>

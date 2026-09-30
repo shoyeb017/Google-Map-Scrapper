@@ -20,7 +20,7 @@ export async function POST(req: Request) {
     items = items.filter((b) => set.has(b.id));
   }
   const cols = columns?.length ? columns : [...EXPORT_COLUMNS];
-  const rows = items.map(businessToRow);
+  const rows = items.map((b) => businessToRow(b));
   await audit("EXPORT_CREATED", {
     entity: "export",
     entityId: searchJobId,
@@ -55,7 +55,7 @@ export async function GET(req: Request) {
     if (["q", "provider", "city", "country", "hasWebsite", "hasEmail", "hasPhone"].includes(k)) filters[k] = v;
   }
   const items = jobId ? (await getJobPackage(jobId)).businesses : await listBusinesses(filters);
-  const rows = items.map(businessToRow);
+  const rows = items.map((b) => businessToRow(b));
   if (format === "xlsx") {
     const buf = await toXlsx(rows, [...EXPORT_COLUMNS]);
     return new NextResponse(new Uint8Array(buf), {
