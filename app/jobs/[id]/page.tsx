@@ -32,6 +32,7 @@ import {
   statusTone,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { rangeSelectTitle, useRangeSelect } from "@/lib/range-select";
 import { loadExportColumnsAsync } from "@/lib/export-settings";
 import { readSSEStream, type StreamLine, type StreamTone } from "@/lib/stream-client";
 import { StreamTerminal, nextLine } from "@/components/stream-terminal";
@@ -193,14 +194,8 @@ export default function PackageDetailPage() {
     return { n, withPhone, withEmail, withSite, withSocials, withCoords, avgComplete, pct, topCats: top(catCount), topProvs: top(provCount) };
   }, [items]);
 
-  function toggle(bid: string) {
-    setSelected((s) => {
-      const n = new Set(s);
-      if (n.has(bid)) n.delete(bid);
-      else n.add(bid);
-      return n;
-    });
-  }
+  const range = useRangeSelect();
+  const pageIds = pageItems.map((b) => b.id);
 
   async function enrich(ids: string[], force?: boolean) {
     if (!ids.length || enriching) return;
@@ -357,8 +352,8 @@ export default function PackageDetailPage() {
         </div>
       </div>
 
-      {/* Package actions */}
-      <div className="animate-fade-up-1 hidden flex-wrap items-center gap-2 lg:flex">
+      {/* Package actions — fixed toolbar on desktop so Enrich stays visible while scrolling leads */}
+      <div className="animate-fade-up-1 hidden flex-wrap items-center gap-2 lg:sticky lg:top-[64px] lg:z-40 lg:flex lg:scroll-mt-20 lg:rounded-2xl lg:border lg:border-slate-200/80 lg:bg-white/90 lg:p-2.5 lg:shadow-lg lg:shadow-teal-950/5 lg:backdrop-blur dark:lg:border-slate-800/80 dark:lg:bg-slate-900/90">
         <Button variant="dark" onClick={() => enrich(items.map((b) => b.id))} loading={busy === "enrich"} disabled={!items.length}>
           <Zap className="h-4 w-4" /> Enrich all ({items.length})
         </Button>
@@ -392,6 +387,9 @@ export default function PackageDetailPage() {
         <p className="rounded-xl bg-emerald-50 dark:bg-emerald-500/10 px-3 py-2 text-sm text-emerald-800 dark:text-emerald-300">{notice}</p>
       ) : null}
 
+      {/* Main + fixed side column: leads scroll, analysis / enrich / progress stay fixed */}
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_340px] lg:items-start">
+      <aside className="flex min-w-0 flex-col gap-4 lg:order-2 lg:sticky lg:top-[136px] lg:z-30 lg:max-h-[calc(100vh-152px)] lg:overflow-y-auto lg:pb-1 slim-scroll lg:scroll-mt-20">
       {/* Find more leads */}
       {isSessionPack ? (
         <Section title="Grow this pack" subtitle="Map-session packs have no resumable location — append fresh results from the live list">
@@ -447,8 +445,8 @@ export default function PackageDetailPage() {
 
       {/* Pack analysis */}
       {items.length > 0 ? (
-        <Section title="Pack analysis" subtitle="What this pack mostly contains + your export columns" className="animate-fade-up-2">
-          <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
+        <Section title="Pack analysis" subtitle="What this pack mostly contains + your export columns" className="animate-fade-up-2 lg:scroll-mt-40">
+          <div className="grid grid-cols-3 gap-2">
             {[
               ["Phone", analysis.withPhone],
               ["Email", analysis.withEmail],
@@ -497,8 +495,10 @@ export default function PackageDetailPage() {
           </div>
         </Section>
       ) : null}
+      </aside>
 
-      {/* Results */}
+      {/* Results — scrolls while the side column stays fixed */}
+      <div className="flex min-w-0 flex-col gap-4 lg:order-1">
       {items.length === 0 ? (
         <EmptyState icon={Building2} title="No leads in this pack" hint="The search found nothing, or its leads were deleted." />
       ) : (
@@ -519,8 +519,11 @@ export default function PackageDetailPage() {
                             else pageItems.forEach((b) => n.add(b.id));
                             return n;
                           });
+                          range.reset();
                         }}
                         className="h-4 w-4 accent-teal-600"
+                        aria-label="Select all on this page"
+                        title={rangeSelectTitle}
                       />
                     </th>
                     <th className="px-3 py-3">Business</th>
@@ -537,7 +540,7 @@ export default function PackageDetailPage() {
                   {pageItems.map((b) => (
                     <tr key={b.id} className={cn("border-b border-slate-100 dark:border-slate-800/70 last:border-0 hover:bg-teal-50/40", selected.has(b.id) ? "bg-teal-50/60 dark:bg-teal-500/10" : "")}>
                       <td className="px-3 py-3">
-                        <input type="checkbox" checked={selected.has(b.id)} onChange={() => toggle(b.id)} className="h-4 w-4 accent-teal-600" />
+                        <input type="checkbox" checked={selected.has(b.id)} className="h-4 w-4 accent-teal-600" aria-label={`Select ${b.name}`} {...range.box(b.id, pageIds, selected, setSelected)} />
                       </td>
                       <td className="max-w-60 px-3 py-3">
                         <Link href={`/businesses/${b.id}`} className="block truncate font-semibold hover:text-teal-700 dark:hover:text-teal-300 hover:underline">
@@ -588,7 +591,7 @@ export default function PackageDetailPage() {
             {pageItems.map((b) => (
               <li key={b.id} className={cn("rounded-2xl border bg-white dark:bg-slate-900 p-3.5 shadow-sm", selected.has(b.id) ? "border-teal-400 ring-2 ring-teal-100 dark:ring-teal-500/30" : "border-slate-200/80 dark:border-slate-800")}>
                 <div className="flex items-start gap-2.5">
-                  <input type="checkbox" checked={selected.has(b.id)} onChange={() => toggle(b.id)} className="mt-1 h-5 w-5 shrink-0 accent-teal-600" />
+                  <input type="checkbox" checked={selected.has(b.id)} className="mt-1 h-5 w-5 shrink-0 accent-teal-600" aria-label={`Select ${b.name}`} {...range.box(b.id, pageIds, selected, setSelected)} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-2">
                       <Link href={`/businesses/${b.id}`} className="truncate font-semibold">{b.name}</Link>
@@ -633,12 +636,15 @@ export default function PackageDetailPage() {
           </ul>
 
           <div className="flex items-center justify-between text-sm">
-            <Button variant="secondary" disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>Previous</Button>
+            <Button variant="secondary" disabled={page === 0} onClick={() => { setPage((p) => Math.max(0, p - 1)); range.reset(); }}>Previous</Button>
             <span className="text-slate-500 dark:text-slate-400">Page {page + 1} of {totalPages}</span>
-            <Button variant="secondary" disabled={page + 1 >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</Button>
+            <Button variant="secondary" disabled={page + 1 >= totalPages} onClick={() => { setPage((p) => p + 1); range.reset(); }}>Next</Button>
           </div>
+          <p className="text-center text-[11px] text-slate-400 dark:text-slate-500">Tip: tick one checkbox, then Shift+click another to select everything between.</p>
         </>
       )}
+      </div>
+      </div>
 
       <Section title="More from this pack" subtitle="Jump to the full profile or keep exploring">
         <div className="flex flex-wrap gap-2 text-sm">

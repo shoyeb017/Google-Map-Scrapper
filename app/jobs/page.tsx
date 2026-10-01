@@ -1,12 +1,13 @@
 "use client";
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { ArrowRight, CalendarDays, MapPin, Package, PackageOpen, Plus, RefreshCw, Zap } from "lucide-react";
+import { ArrowRight, CalendarDays, ChevronDown, ChevronUp, MapPin, Package, PackageOpen, Plus, RefreshCw, X, Zap } from "lucide-react";
 import { Badge, Button, ConfirmButton, EmptyState, Input, PackBadge, ProgressBar, ProviderBadge, Section, Select, SkeletonList, Toggle, packKind, statusTone } from "@/components/ui";
 import { StreamTerminal, nextLine } from "@/components/stream-terminal";
 import { readSSEStream, type StreamLine, type StreamTone } from "@/lib/stream-client";
 import { ExportPacksOverlay } from "@/components/export-packs-overlay";
 import { cn } from "@/lib/cn";
+import { rangeSelectTitle, useRangeSelect } from "@/lib/range-select";
 
 interface Job {
   id: string;
@@ -45,6 +46,7 @@ export default function PackagesPage() {
   const [sort, setSort] = useState("newest");
   const [view, setView] = useState<"full" | "list">("full");
   const [exportOpen, setExportOpen] = useState(false);
+  const [minimized, setMinimized] = useState(false);
 
   // Persist view + filters per user request ("it should save the state").
   useEffect(() => {
@@ -111,17 +113,12 @@ export default function PackagesPage() {
     });
   }
 
-  function togglePack(id: string) {
-    setSelected((s) => {
-      const n = new Set(s);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      return n;
-    });
-  }
+  const range = useRangeSelect();
+  const shownIds = shownJobs.map((j) => j.id);
 
   function selectShown() {
     setSelected(new Set(shownJobs.map((j) => j.id)));
+    range.reset();
   }
 
   async function enrichSelected() {
@@ -131,6 +128,7 @@ export default function PackagesPage() {
     setNotice(null);
     setLines([]);
     setStartedAt(Date.now());
+    setMinimized(false);
     setPackProgress({ donePacks: 0, totalPacks: ids.length, doneLeads: 0, totalLeads: 0, current: "" });
     const push = (text: string, tone: StreamTone = "info") =>
       setLines((prev) => [...prev.slice(-250), nextLine(text, tone)]);
@@ -186,8 +184,22 @@ export default function PackagesPage() {
     }
   }
 
+  const panelVisible = selected.size > 0 || enriching || lines.length > 0;
+  const panelPct =
+    packProgress && packProgress.totalPacks > 0
+      ? Math.round((packProgress.donePacks / Math.max(1, packProgress.totalPacks)) * 100)
+      : null;
+
+  function dismissPanel() {
+    setLines([]);
+    setPackProgress(null);
+    setNotice(null);
+    setMinimized(false);
+    range.reset();
+  }
+
   return (
-    <div className="flex flex-col gap-4">
+    <div className={cn("flex flex-col gap-4", panelVisible && !minimized ? "pb-72 sm:pb-48" : panelVisible ? "pb-16" : "")}>
       <div className="animate-fade-up flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-xl font-bold sm:text-2xl">Scraped Packs</h1>
@@ -220,8 +232,8 @@ export default function PackagesPage() {
             </span>
           </div>
           <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-            <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search packs by keyword, location…" className="h-9 w-full text-sm sm:w-64" />
-            <Select value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort packs" className="h-9 w-full text-sm sm:w-auto">
+            <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search packs by keyword, location…" className="w-full sm:w-64" />
+            <Select value={sort} onChange={(e) => setSort(e.target.value)} aria-label="Sort packs" className="w-full sm:w-auto">
               <option value="newest">Sort: Newest</option>
               <option value="oldest">Sort: Oldest</option>
               <option value="leads">Sort: Most leads</option>
@@ -244,9 +256,50 @@ export default function PackagesPage() {
         </div>
       </div>
 
-      {selected.size > 0 || enriching || lines.length > 0 ? (
-        <div className="sticky top-[60px] z-30 flex flex-col gap-3">
-          <Section title={`Enrich packs pack-by-pack${selected.size ? ` — ${selected.size} selected` : ""}`} subtitle="Runs one pack fully, then the next. Live log below.">
+      {panelVisible ? (
+        <div className="fixed inset-x-3 bottom-3 z-[1000] sm:left-auto sm:right-6 sm:bottom-6 sm:w-[440px]">
+          {minimized ? (
+            <div className="flex w-full items-center gap-1.5 rounded-2xl bg-slate-900/95 py-2 pl-4 pr-2 text-sm text-white shadow-2xl backdrop-blur">
+              <button
+                type="button"
+                onClick={() => setMinimized(false)}
+                className="flex min-w-0 flex-1 items-center gap-2.5 py-1 text-left"
+                aria-label="Expand enrich panel"
+              >
+                <span className="relative flex h-2.5 w-2.5 shrink-0">
+                  {enriching ? <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-teal-400 opacity-60" /> : null}
+                  <span className={cn("relative inline-flex h-2.5 w-2.5 rounded-full", enriching ? "bg-teal-400" : "bg-emerald-400")} />
+                </span>
+                <span className="min-w-0 flex-1 truncate font-medium">
+                  {enriching ? "Enriching packs…" : lines.length > 0 ? "Enrich log" : `Enrich ${selected.size} pack${selected.size === 1 ? "" : "s"}`}
+                </span>
+                {panelPct !== null && enriching ? <span className="shrink-0 tabular-nums text-teal-300">{panelPct}%</span> : null}
+                <ChevronUp className="h-4 w-4 shrink-0 text-slate-400" />
+              </button>
+              {!enriching && selected.size === 0 ? (
+                <button
+                  type="button"
+                  onClick={dismissPanel}
+                  aria-label="Dismiss enrich panel"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl text-slate-400 hover:bg-white/10 hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              ) : null}
+            </div>
+          ) : (
+          <div className="flex max-h-[calc(100dvh-120px)] flex-col gap-3 overflow-y-auto slim-scroll rounded-2xl">
+          <Section title={`Enrich packs pack-by-pack${selected.size ? ` — ${selected.size} selected` : ""}`} subtitle="Runs one pack fully, then the next. Live log below." className="shadow-2xl ring-1 ring-slate-900/10 dark:ring-white/10"
+            action={
+              <button
+                type="button"
+                onClick={() => setMinimized(true)}
+                aria-label="Minimize enrich panel"
+                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-300"
+              >
+                <ChevronDown className="h-4 w-4" />
+              </button>
+            }>
             <div className="flex flex-wrap items-center gap-2">
               <Button onClick={enrichSelected} loading={enriching} disabled={!selected.size}>
                 <Zap className="h-4 w-4" /> {enriching ? "Enriching…" : `Enrich ${selected.size} pack${selected.size === 1 ? "" : "s"}`}
@@ -257,9 +310,10 @@ export default function PackagesPage() {
               <Toggle checked={force} onChange={setForce} label="Force re-enrich all leads" />
               <span className="ml-auto flex gap-1.5 text-xs">
                 <button onClick={selectShown} className="rounded-lg bg-slate-100 dark:bg-slate-800 px-2.5 py-1.5 font-medium hover:bg-slate-200 dark:hover:bg-slate-700">Select shown</button>
-                <button onClick={() => setSelected(new Set())} className="rounded-lg bg-slate-100 dark:bg-slate-800 px-2.5 py-1.5 font-medium hover:bg-slate-200 dark:hover:bg-slate-700">Clear</button>
+                <button onClick={() => { setSelected(new Set()); range.reset(); }} className="rounded-lg bg-slate-100 dark:bg-slate-800 px-2.5 py-1.5 font-medium hover:bg-slate-200 dark:hover:bg-slate-700">Clear</button>
               </span>
             </div>
+            <p className="mt-2 text-[11px] text-slate-400 dark:text-slate-500">Tip: tick one pack, then Shift+click another to select everything between.</p>
             {/* Fixed-height progress block so the list below never jumps */}
             <div className="mt-3 min-h-[44px]">
               {packProgress ? (
@@ -290,6 +344,8 @@ export default function PackagesPage() {
               progress={packProgress ? { done: packProgress.donePacks, total: packProgress.totalPacks } : null}
             />
           ) : null}
+          </div>
+          )}
         </div>
       ) : null}
 
@@ -315,7 +371,7 @@ export default function PackagesPage() {
                 <table className="dtable min-w-full">
                   <thead>
                     <tr>
-                      <th className="w-10 px-3 py-3"><input type="checkbox" checked={shownJobs.length > 0 && shownJobs.every((j) => selected.has(j.id))} onChange={() => (shownJobs.every((j) => selected.has(j.id)) ? setSelected(new Set()) : selectShown())} className="h-4 w-4 accent-teal-600" aria-label="Select all packs" /></th>
+                      <th className="w-10 px-3 py-3"><input type="checkbox" checked={shownJobs.length > 0 && shownJobs.every((j) => selected.has(j.id))} onChange={() => (shownJobs.every((j) => selected.has(j.id)) ? (setSelected(new Set()), range.reset()) : selectShown())} className="h-4 w-4 accent-teal-600" aria-label="Select all packs" title={rangeSelectTitle} /></th>
                       <th className="px-3 py-3">Pack</th>
                       <th className="px-3 py-3">Location</th>
                       <th className="px-3 py-3">Saved</th>
@@ -328,7 +384,7 @@ export default function PackagesPage() {
                   <tbody>
                     {shownJobs.map((j) => (
                       <tr key={j.id} className={cn(selected.has(j.id) ? "row-selected" : "")}>
-                        <td className="px-3 py-2.5"><input type="checkbox" checked={selected.has(j.id)} onChange={() => togglePack(j.id)} className="h-4 w-4 accent-teal-600" aria-label={`Select pack ${j.keyword}`} /></td>
+                        <td className="px-3 py-2.5"><input type="checkbox" checked={selected.has(j.id)} className="h-4 w-4 accent-teal-600" aria-label={`Select pack ${j.keyword}`} {...range.box(j.id, shownIds, selected, setSelected)} /></td>
                         <td className="max-w-56 px-3 py-2.5"><Link href={`/jobs/${j.id}`} className="block truncate font-semibold hover:underline">{j.keyword}</Link></td>
                         <td className="max-w-48 truncate px-3 py-2.5 text-xs text-slate-500">{j.locationText}</td>
                         <td className="px-3 py-2.5 tabular-nums">{j.totalSaved}</td>
@@ -351,9 +407,9 @@ export default function PackagesPage() {
                 <input
                   type="checkbox"
                   checked={selected.has(j.id)}
-                  onChange={() => togglePack(j.id)}
                   aria-label={`Select pack ${j.keyword}`}
                   className="mt-1 h-5 w-5 shrink-0 accent-teal-600"
+                  {...range.box(j.id, shownIds, selected, setSelected)}
                 />
                 <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-teal-500 to-cyan-500 text-white">
                   <Package className="h-5 w-5" />

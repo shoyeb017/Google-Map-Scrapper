@@ -16,6 +16,7 @@ import {
   SocialIcons,
 } from "@/components/ui";
 import { cn } from "@/lib/cn";
+import { rangeSelectTitle, useRangeSelect } from "@/lib/range-select";
 
 interface Biz {
   id: string;
@@ -140,14 +141,8 @@ export default function BusinessesPage() {
   const totalPages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
   const pageItems = useMemo(() => sorted.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE), [sorted, page]);
 
-  function toggle(id: string) {
-    setSelected((s) => {
-      const n = new Set(s);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      return n;
-    });
-  }
+  const range = useRangeSelect();
+  const pageIds = pageItems.map((b) => b.id);
 
   function togglePage() {
     setSelected((s) => {
@@ -157,6 +152,7 @@ export default function BusinessesPage() {
       else pageItems.forEach((b) => n.add(b.id));
       return n;
     });
+    range.reset();
   }
 
   async function bulkEnrich() {
@@ -318,7 +314,7 @@ export default function BusinessesPage() {
                 <thead>
                   <tr className="border-b border-slate-100 dark:border-slate-800/70 bg-slate-50/70 dark:bg-slate-800/50 text-left text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
                     <th className="w-10 px-3 py-3">
-                      <input type="checkbox" checked={pageItems.length > 0 && pageItems.every((b) => selected.has(b.id))} onChange={togglePage} className="h-4 w-4 accent-teal-600" />
+                      <input type="checkbox" checked={pageItems.length > 0 && pageItems.every((b) => selected.has(b.id))} onChange={togglePage} className="h-4 w-4 accent-teal-600" aria-label="Select all on this page" title={rangeSelectTitle} />
                     </th>
                     <th className="px-3 py-3">Business</th>
                     <th className="px-3 py-3">Contact</th>
@@ -335,7 +331,7 @@ export default function BusinessesPage() {
                   {pageItems.map((b) => (
                     <tr key={b.id} className={cn("border-b border-slate-100 dark:border-slate-800/70 last:border-0 transition hover:bg-teal-50/40", selected.has(b.id) ? "bg-teal-50/60 dark:bg-teal-500/10" : "")}>
                       <td className="px-3 py-3">
-                        <input type="checkbox" checked={selected.has(b.id)} onChange={() => toggle(b.id)} className="h-4 w-4 accent-teal-600" />
+                        <input type="checkbox" checked={selected.has(b.id)} className="h-4 w-4 accent-teal-600" aria-label={`Select ${b.name}`} {...range.box(b.id, pageIds, selected, setSelected)} />
                       </td>
                       <td className="max-w-64 px-3 py-3">
                         <Link href={`/businesses/${b.id}`} className="block truncate font-semibold text-slate-900 dark:text-white hover:text-teal-700 dark:hover:text-teal-300 hover:underline">
@@ -407,7 +403,7 @@ export default function BusinessesPage() {
                 className={cn("rounded-2xl border bg-white dark:bg-slate-900 p-3.5 shadow-sm", selected.has(b.id) ? "border-teal-400 ring-2 ring-teal-100 dark:ring-teal-500/30" : "border-slate-200/80 dark:border-slate-800")}
               >
                 <div className="flex items-start gap-2.5">
-                  <input type="checkbox" checked={selected.has(b.id)} onChange={() => toggle(b.id)} className="mt-1 h-5 w-5 shrink-0 accent-teal-600" />
+                  <input type="checkbox" checked={selected.has(b.id)} className="mt-1 h-5 w-5 shrink-0 accent-teal-600" aria-label={`Select ${b.name}`} {...range.box(b.id, pageIds, selected, setSelected)} />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-start justify-between gap-2">
                       <Link href={`/businesses/${b.id}`} className="truncate font-semibold text-slate-900 dark:text-white">
@@ -455,10 +451,11 @@ export default function BusinessesPage() {
 
           {/* Pagination */}
           <div className="flex items-center justify-between text-sm">
-            <Button variant="secondary" disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>Previous</Button>
+            <Button variant="secondary" disabled={page === 0} onClick={() => { setPage((p) => Math.max(0, p - 1)); range.reset(); }}>Previous</Button>
             <span className="text-slate-500 dark:text-slate-400">Page {page + 1} of {totalPages}</span>
-            <Button variant="secondary" disabled={page + 1 >= totalPages} onClick={() => setPage((p) => p + 1)}>Next</Button>
+            <Button variant="secondary" disabled={page + 1 >= totalPages} onClick={() => { setPage((p) => p + 1); range.reset(); }}>Next</Button>
           </div>
+          <p className="text-center text-[11px] text-slate-400 dark:text-slate-500">Tip: tick one checkbox, then Shift+click another to select everything between.</p>
         </>
       )}
 

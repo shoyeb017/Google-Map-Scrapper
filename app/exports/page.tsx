@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CheckSquare, Download, FileSpreadsheet, FileText, Settings2, Square } from "lucide-react";
 import { Button, Section } from "@/components/ui";
 import { EXPORT_COLUMNS } from "@/lib/exports/exporter";
@@ -37,7 +37,13 @@ export default function ExportSettingsPage() {
     }
   }
 
-  function toggle(c: string) {
+  // Shift+click anchor: click one column, then Shift+click another
+  // to check/uncheck everything between (same as Gmail range select).
+  type Col = (typeof EXPORT_COLUMNS)[number];
+  const lastCol = useRef<Col | null>(null);
+
+  function toggle(c: Col) {
+    lastCol.current = c;
     const next = cols.includes(c) ? cols.filter((x) => x !== c) : [...cols, c];
     setCols(next);
     // The database requires at least one column — persist only then.
@@ -45,13 +51,36 @@ export default function ExportSettingsPage() {
     if (next.length > 0) void persist(next);
   }
 
+  function toggleRange(e: React.MouseEvent, c: Col) {
+    const anchor = lastCol.current;
+    if (e.shiftKey && anchor && anchor !== c) {
+      const a = EXPORT_COLUMNS.indexOf(anchor);
+      const b = EXPORT_COLUMNS.indexOf(c);
+      if (a !== -1 && b !== -1) {
+        const [lo, hi] = a <= b ? [a, b] : [b, a];
+        const slice = EXPORT_COLUMNS.slice(lo, hi + 1);
+        const turningOn = !cols.includes(c);
+        const next = turningOn
+          ? Array.from(new Set([...cols, ...slice]))
+          : cols.filter((x) => !(slice as string[]).includes(x));
+        lastCol.current = c;
+        setCols(next);
+        if (next.length > 0) void persist(next);
+        return;
+      }
+    }
+    toggle(c);
+  }
+
   function selectAll(on: boolean) {
     if (!on) return;
+    lastCol.current = null;
     void persist([...EXPORT_COLUMNS]);
   }
 
   function selectNone() {
     // Clear the UI only (nothing to save until at least one is picked).
+    lastCol.current = null;
     setCols([]);
   }
 
@@ -92,7 +121,7 @@ export default function ExportSettingsPage() {
 
       <Section
         title={`Columns (${cols.length}/${EXPORT_COLUMNS.length})`}
-        subtitle="Only checked columns will download anywhere in the app"
+        subtitle="Only checked columns will download anywhere in the app — Shift+click selects a whole range"
         className="animate-fade-up-1"
         action={
           <div className="flex gap-2 text-xs">
@@ -114,7 +143,8 @@ export default function ExportSettingsPage() {
             return (
               <button
                 key={c}
-                onClick={() => toggle(c)}
+                onClick={(e) => toggleRange(e, c)}
+                title="Click to toggle — Shift+click to toggle a range"
                 className={cn(
                   "flex items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm transition",
                   on ? "border-teal-300 dark:border-teal-500 bg-teal-50/60 dark:bg-teal-500/10 font-medium" : "border-slate-200 dark:border-slate-800 text-slate-500 dark:text-slate-400"
